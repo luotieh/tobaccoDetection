@@ -1,9 +1,13 @@
 #!/usr/bin/env python3
+import base64
+import cgi
 import json
+import os
 import random
 import re
 import sqlite3
 import sys
+import tempfile
 from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -14,6 +18,24 @@ ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "demo.db"
+MODEL_REGISTRY = {
+    "basant-yolo26s": {
+        "name": "basant18/Smoking-detection-YOLO26s",
+        "version": "Smoking-detection-YOLO26s/best.pt",
+        "path": Path(os.environ.get("SMOKING_MODEL_PATH", ROOT / "models" / "best.pt")),
+        "source_url": "https://huggingface.co/basant18/Smoking-detection-YOLO26s/resolve/main/weights/best.pt",
+        "description": "YOLO26s smoking detection model",
+    },
+    "enos-yolo11m": {
+        "name": "Enos-123/smoking-detection",
+        "version": "YOLOv11-Medium/best.pt",
+        "path": Path(os.environ.get("ENOS_SMOKING_MODEL_PATH", ROOT / "models" / "enos-smoking-detection-best.pt")),
+        "source_url": "https://huggingface.co/Enos-123/smoking-detection/resolve/main/best.pt",
+        "description": "YOLOv11-Medium cigarette detector, class: cigarette",
+    },
+}
+DEFAULT_DETECTOR_MODEL_ID = os.environ.get("SMOKING_DETECTOR_MODEL", "basant-yolo26s")
+_YOLO_MODELS = {}
 
 
 def now():
@@ -134,7 +156,8 @@ CREATE TABLE IF NOT EXISTS push_logs (
 
 MODELS = [
     ("m_text_001", "文本交易意图识别模型", "text", "text-risk-v1.0", "/api/mock/text/analyze", 0.70, 30, 1, "识别标题、评论、账号简介中的违法售烟关键词和交易意图"),
-    ("m_image_001", "图像香烟包装识别模型", "image", "image-risk-v1.0", "/api/mock/image/analyze", 0.75, 30, 1, "识别图片和视频帧中的香烟包装、品牌和OCR文字"),
+    ("m_image_001", "Smoking-detection-YOLO26s 图像识别模型", "image", "Smoking-detection-YOLO26s/best.pt", "/api/image-detector/analyze", 0.50, 30, 1, "使用 Hugging Face basant18/Smoking-detection-YOLO26s 的 best.pt 识别图片中的香烟目标"),
+    ("m_image_002", "Enos smoking-detection 图像识别模型", "image", "YOLOv11-Medium/best.pt", "/api/image-detector/analyze", 0.50, 30, 1, "使用 Hugging Face Enos-123/smoking-detection 的 best.pt 识别 cigarette 目标"),
     ("m_audio_001", "语音交易话术识别模型", "audio", "audio-risk-v1.0", "/api/mock/audio/analyze", 0.70, 60, 1, "短视频口播转写和交易话术识别"),
     ("m_fusion_001", "多模态融合评分模型", "fusion", "fusion-risk-v1.0", "/api/mock/fusion/analyze", 0.80, 30, 1, "综合文本、图像、语音结果输出最终风险评分"),
 ]
@@ -182,6 +205,18 @@ def init_db():
         conn.executescript(SCHEMA)
         if conn.execute("SELECT COUNT(*) FROM model_configs").fetchone()[0] == 0:
             conn.executemany("INSERT INTO model_configs VALUES (?,?,?,?,?,?,?,?,?)", MODELS)
+        else:
+            for model in MODELS:
+                exists = conn.execute("SELECT 1 FROM model_configs WHERE id=?", (model[0],)).fetchone()
+                if exists:
+                    conn.execute(
+                        """UPDATE model_configs
+                           SET model_name=?, model_type=?, model_version=?, endpoint=?, threshold=?, timeout=?, enabled=?, description=?
+                           WHERE id=?""",
+                        (model[1], model[2], model[3], model[4], model[5], model[6], model[7], model[8], model[0]),
+                    )
+                else:
+                    conn.execute("INSERT INTO model_configs VALUES (?,?,?,?,?,?,?,?,?)", model)
         if conn.execute("SELECT COUNT(*) FROM fusion_config").fetchone()[0] == 0:
             conn.execute("INSERT INTO fusion_config VALUES (1,0.30,0.35,0.25,0.10,0.85,0.65,0.40)")
         if conn.execute("SELECT COUNT(*) FROM rule_words").fetchone()[0] == 0:
@@ -252,6 +287,121 @@ def analyze_image(payload):
         "confidence": 0.92 if risky else 0.68 if medium else 0.41,
         "evidence_frame": payload.get("image_url") or "/mock/images/evidence_001.jpg",
         "model_version": "image-risk-v1.0",
+    }
+
+
+def detector_model_info(model_id, cfg):
+    path = cfg["path"]
+    return {
+        "id": model_id,
+        "name": cfg["name"],
+        "version": cfg["version"],
+        "description": cfg["description"],
+        "model_path": str(path),
+        "model_exists": path.exists(),
+        "model_size_mb": round(path.stat().st_size / 1024 / 1024, 2) if path.exists() else 0,
+        "model_source_url": cfg["source_url"],
+    }
+
+
+def normalize_detector_model_id(model_id=None):
+    if model_id in MODEL_REGISTRY:
+        return model_id
+    if DEFAULT_DETECTOR_MODEL_ID in MODEL_REGISTRY:
+        return DEFAULT_DETECTOR_MODEL_ID
+    return next(iter(MODEL_REGISTRY))
+
+
+def image_detector_status(selected_model_id=None):
+    deps = {}
+    for module in ["ultralytics", "cv2", "torch"]:
+        try:
+            imported = __import__(module)
+            deps[module] = getattr(imported, "__version__", "installed")
+        except Exception as exc:
+            deps[module] = f"missing: {exc}"
+    model_id = normalize_detector_model_id(selected_model_id)
+    models = [detector_model_info(mid, cfg) for mid, cfg in MODEL_REGISTRY.items()]
+    current = next(item for item in models if item["id"] == model_id)
+    return {
+        **current,
+        "current_model_id": model_id,
+        "models": models,
+        "dependencies": deps,
+        "ready": current["model_exists"] and all(not str(v).startswith("missing:") for v in deps.values()),
+    }
+
+
+def load_yolo_model(model_id=None):
+    model_id = normalize_detector_model_id(model_id)
+    if model_id in _YOLO_MODELS:
+        return _YOLO_MODELS[model_id], MODEL_REGISTRY[model_id]
+    cfg = MODEL_REGISTRY[model_id]
+    model_path = cfg["path"]
+    if not model_path.exists():
+        raise RuntimeError(f"模型文件不存在：{model_path}，请从 {cfg['source_url']} 下载 best.pt")
+    try:
+        from ultralytics import YOLO
+    except Exception as exc:
+        raise RuntimeError("缺少 ultralytics 依赖，请先执行：pip install -r requirements.txt") from exc
+    _YOLO_MODELS[model_id] = YOLO(str(model_path))
+    return _YOLO_MODELS[model_id], cfg
+
+
+def yolo_detect_image(image_bytes, filename="", conf=0.5, imgsz=800, model_id=None):
+    if not image_bytes:
+        raise ValueError("请上传图片文件")
+    suffix = Path(filename or "upload.jpg").suffix.lower()
+    if suffix not in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}:
+        suffix = ".jpg"
+    model_id = normalize_detector_model_id(model_id)
+    model, cfg = load_yolo_model(model_id)
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
+        tmp.write(image_bytes)
+        tmp.flush()
+        results = model.predict(source=tmp.name, imgsz=int(imgsz), conf=float(conf), verbose=False)
+    result = results[0]
+    names = getattr(result, "names", {}) or getattr(model, "names", {}) or {}
+    detections = []
+    boxes = getattr(result, "boxes", None)
+    if boxes is not None:
+        for box in boxes:
+            cls_id = int(box.cls[0].item())
+            score = float(box.conf[0].item())
+            xyxy = [float(v) for v in box.xyxy[0].tolist()]
+            detections.append({
+                "class_id": cls_id,
+                "class_name": names.get(cls_id, str(cls_id)) if isinstance(names, dict) else str(cls_id),
+                "confidence": round(score, 4),
+                "box": {
+                    "x1": round(xyxy[0], 2),
+                    "y1": round(xyxy[1], 2),
+                    "x2": round(xyxy[2], 2),
+                    "y2": round(xyxy[3], 2),
+                },
+            })
+    max_conf = max([d["confidence"] for d in detections], default=0)
+    annotated_image = ""
+    try:
+        import cv2
+        plotted = result.plot()
+        ok, encoded = cv2.imencode(".jpg", plotted)
+        if ok:
+            annotated_image = "data:image/jpeg;base64," + base64.b64encode(encoded.tobytes()).decode("ascii")
+    except Exception:
+        annotated_image = ""
+    return {
+        "model_id": model_id,
+        "model_name": cfg["name"],
+        "model_version": cfg["version"],
+        "image_risk_score": round(max_conf, 4),
+        "detected": bool(detections),
+        "detected_objects": sorted({d["class_name"] for d in detections}),
+        "detections": detections,
+        "confidence": round(max_conf, 4),
+        "threshold": float(conf),
+        "image_size": int(imgsz),
+        "annotated_image": annotated_image,
     }
 
 
@@ -395,6 +545,29 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
+    def body_multipart_image(self):
+        form = cgi.FieldStorage(
+            fp=self.rfile,
+            headers=self.headers,
+            environ={
+                "REQUEST_METHOD": "POST",
+                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
+            },
+        )
+        image = form["image"] if "image" in form else None
+        if image is None or not getattr(image, "file", None):
+            raise ValueError("缺少 image 文件字段")
+        def form_value(name, default):
+            return form[name].value if name in form and not getattr(form[name], "filename", None) else default
+        return {
+            "image_bytes": image.file.read(),
+            "filename": image.filename or "upload.jpg",
+            "conf": float(form_value("conf", 0.5)),
+            "imgsz": int(form_value("imgsz", 800)),
+            "model_id": form_value("model_id", DEFAULT_DETECTOR_MODEL_ID),
+        }
+
     def serve_static(self):
         path = urlparse(self.path).path
         file_path = STATIC_DIR / ("index.html" if path in {"/", ""} else path.lstrip("/"))
@@ -424,6 +597,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/models":
                 with db() as conn:
                     return self.send_json(rows_to_list(conn.execute("SELECT * FROM model_configs ORDER BY model_type").fetchall()))
+            if path == "/api/image-detector/status":
+                return self.send_json(image_detector_status(qs.get("model_id")))
             if path == "/api/fusion-config":
                 return self.send_json(fusion_config())
             if path == "/api/rules":
@@ -439,6 +614,9 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         path = urlparse(self.path).path
         try:
+            if path == "/api/image-detector/analyze":
+                payload = self.body_multipart_image()
+                return self.send_json(yolo_detect_image(**payload))
             payload = self.body_json()
             if path == "/api/contents":
                 return self.send_json(api_create_content(payload), 201)

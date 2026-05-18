@@ -1,0 +1,11 @@
+{
+  "cigarette_pack": "烟盒/单包烟",
+  "cigarette_carton": "条盒/整条烟",
+  "cigarette": "单支香烟",
+  "smoking_person": "吸烟人员",
+  "lighter": "打火机",
+  "ashtray": "烟灰缸",
+  "parcel": "快递包裹",
+  "price_tag": "价格牌/价格文字区域",
+  "unknown": "未知"
+}

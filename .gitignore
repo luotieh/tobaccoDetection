@@ -1,5 +1,14 @@
 __pycache__/
 *.pyc
+*:Zone.Identifier
+.venv/
 data/*.db
 data/*.db-*
-
+models/*.pt
+storage/uploads/*
+storage/evidence/*
+storage/results/*
+!storage/uploads/.gitkeep
+!storage/evidence/.gitkeep
+!storage/results/.gitkeep
+.pytest_cache/

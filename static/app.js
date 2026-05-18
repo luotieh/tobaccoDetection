@@ -1,7 +1,7 @@
 const state = { route: "dashboard", data: null };
 
 const menus = [
-  ["核心功能", [["dashboard", "工作台"], ["contents", "识别内容列表"]]],
+  ["核心功能", [["dashboard", "工作台"], ["contents", "识别内容列表"], ["image-test", "图像识别测试"]]],
   ["配置管理", [["models", "模型配置"], ["fusion", "多模态融合配置"], ["rules", "规则词库"]]],
   ["业务闭环", [["reviews", "审核管理"], ["push", "推送管理"], ["users", "用户角色"]]],
 ];
@@ -9,6 +9,7 @@ const menus = [
 const titles = {
   dashboard: ["工作台", "数据概览与线索趋势"],
   contents: ["识别内容列表", "管理待识别内容并执行 Mock 识别"],
+  "image-test": ["图像识别测试", "上传图片调用 best.pt 目标检测接口"],
   detail: ["内容详情", "查看三模态识别结果、融合评分和审核动作"],
   models: ["模型配置", "配置文本、图像、语音与融合模型"],
   fusion: ["多模态融合配置", "调整权重和风险等级阈值"],
@@ -25,6 +26,13 @@ const api = async (url, options = {}) => {
     ...options,
     body: options.body ? JSON.stringify(options.body) : undefined,
   });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "请求失败");
+  return data;
+};
+
+const apiForm = async (url, formData) => {
+  const res = await fetch(url, { method: "POST", body: formData });
   const data = await res.json();
   if (!res.ok) throw new Error(data.error || "请求失败");
   return data;
@@ -115,6 +123,100 @@ async function renderContents() {
     </div>
     <div class="table-wrap">${contentsTable(rows)}</div>
   `;
+}
+
+async function renderImageTest() {
+  const status = await api("/api/image-detector/status");
+  $("#view").innerHTML = `
+    <div class="panel">
+      <h3 class="section-title">模型状态 <span class="tag ${status.ready ? "green" : "red"}">${status.ready ? "已就绪" : "不可用"}</span></h3>
+      <div class="kv">
+        <b>权重路径</b><span>${status.model_path}</span>
+        <b>权重大小</b><span>${status.model_exists ? status.model_size_mb + " MB" : "未找到"}</span>
+        <b>当前模型</b><span>${status.name}｜${status.version}</span>
+        <b>依赖状态</b><span>${Object.entries(status.dependencies).map(([k, v]) => `${k}: ${v}`).join("；")}</span>
+      </div>
+    </div>
+    <div class="panel">
+      <h3 class="section-title">上传测试</h3>
+      <div class="detector-grid">
+        <div class="detector-form">
+          <label><span>识别模型</span><select id="detectorModel">${status.models.map(m => `<option value="${m.id}">${m.name}｜${m.version}${m.model_exists ? "" : "（未下载）"}</option>`).join("")}</select></label>
+          <label><span>图片文件</span><input id="detectorFile" type="file" accept="image/*" /></label>
+          <div class="form-grid">
+            <label><span>置信度阈值</span><input id="detectorConf" type="number" min="0.01" max="0.99" step="0.01" value="0.50" /></label>
+            <label><span>推理尺寸</span><input id="detectorSize" type="number" min="320" max="1280" step="32" value="800" /></label>
+          </div>
+          <div class="dialog-actions"><button id="detectorBtn" onclick="runImageDetector()">开始识别</button></div>
+        </div>
+        <div class="detector-preview" id="detectorPreview">请选择一张图片</div>
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="panel"><h3 class="section-title">检测结果</h3><div id="detectorSummary" class="result-box pre">暂无结果</div></div>
+      <div class="panel"><h3 class="section-title">检测框</h3><div id="detectorTable" class="result-box pre">暂无结果</div></div>
+    </div>
+  `;
+  $("#detectorModel").value = status.current_model_id;
+  $("#detectorModel").addEventListener("change", refreshDetectorStatus);
+  $("#detectorFile").addEventListener("change", previewDetectorFile);
+}
+
+async function refreshDetectorStatus() {
+  const modelId = $("#detectorModel").value;
+  const status = await api(`/api/image-detector/status?model_id=${encodeURIComponent(modelId)}`);
+  const state = status.ready ? "已就绪" : "不可用";
+  toast(`${status.name}：${state}`);
+}
+
+function previewDetectorFile() {
+  const file = $("#detectorFile").files[0];
+  if (!file) {
+    $("#detectorPreview").textContent = "请选择一张图片";
+    return;
+  }
+  const url = URL.createObjectURL(file);
+  $("#detectorPreview").innerHTML = `<img src="${url}" alt="待识别图片">`;
+}
+
+async function runImageDetector() {
+  const file = $("#detectorFile").files[0];
+  if (!file) return toast("请先选择图片");
+  const btn = $("#detectorBtn");
+  btn.disabled = true;
+  btn.textContent = "识别中";
+  try {
+    const form = new FormData();
+    form.append("image", file);
+    form.append("model_id", $("#detectorModel").value);
+    form.append("conf", $("#detectorConf").value || "0.5");
+    form.append("imgsz", $("#detectorSize").value || "800");
+    const result = await apiForm("/api/image-detector/analyze", form);
+    if (result.annotated_image) {
+      $("#detectorPreview").innerHTML = `<img src="${result.annotated_image}" alt="识别标注图">`;
+    }
+    $("#detectorSummary").textContent = [
+      `是否检出：${result.detected ? "是" : "否"}`,
+      `最高置信度：${Number(result.confidence || 0).toFixed(4)}`,
+      `风险分：${Number(result.image_risk_score || 0).toFixed(4)}`,
+      `目标类别：${(result.detected_objects || []).join("、") || "-"}`,
+      `模型名称：${result.model_name}`,
+      `模型版本：${result.model_version}`,
+    ].join("\n");
+    $("#detectorTable").innerHTML = detectionsTable(result.detections || []);
+    toast("图像识别完成");
+  } catch (err) {
+    $("#detectorSummary").textContent = err.message;
+    toast("识别失败");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "开始识别";
+  }
+}
+
+function detectionsTable(rows) {
+  if (!rows.length) return `<div class="pre">未检出目标</div>`;
+  return `<table><thead><tr><th>类别</th><th>置信度</th><th>坐标</th></tr></thead><tbody>${rows.map(r => `<tr><td>${r.class_name}</td><td>${Number(r.confidence).toFixed(4)}</td><td>${r.box.x1}, ${r.box.y1}, ${r.box.x2}, ${r.box.y2}</td></tr>`).join("")}</tbody></table>`;
 }
 
 function contentsTable(rows) {
@@ -354,6 +456,7 @@ async function renderApp() {
   try {
     if (route === "dashboard") await renderDashboard();
     else if (route === "contents") await renderContents();
+    else if (route === "image-test") await renderImageTest();
     else if (route === "detail") await renderDetail(id);
     else if (route === "models") await renderModels();
     else if (route === "fusion") await renderFusion();
@@ -370,4 +473,3 @@ async function renderApp() {
 window.addEventListener("hashchange", renderApp);
 renderNav();
 renderApp();
-
