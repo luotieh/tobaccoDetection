@@ -1,0 +1,10 @@
+{
+  "sale_intent": "疑似售烟意图",
+  "trade_lead": "交易引流",
+  "brand_mention": "烟草品牌提及",
+  "slang_mention": "黑话/隐晦表达",
+  "contact_lead": "联系方式引流",
+  "price_quantity": "价格/数量/规格表达",
+  "whitelist_context": "白名单语境",
+  "normal_speech": "普通口播"
+}

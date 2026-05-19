@@ -186,6 +186,37 @@ pytest
 
 后续扩展方向：接入 CLIP/VLM 场景理解、烟盒 ROI 品牌分类、PaddleOCR 增强、ONNX/TensorRT 加速、队列异步推理和审核反馈闭环。
 
+## 语音识别服务
+
+`audio` 分支根据 `docs/tobacco_audio_codex_spec.md` 提供独立的 FastAPI 语音风险服务，包名为 `audio_service`，默认端口 `8020`。
+
+```bash
+AUDIO_PORT=8020 scripts/run_audio_dev.sh
+```
+
+主要接口：
+
+```text
+GET  /health
+GET  /models/info
+POST /infer/audio
+POST /infer/video-audio
+```
+
+Mock ASR 默认返回空转写；可通过环境变量提供演示转写：
+
+```bash
+MOCK_TRANSCRIPT='刚到一批，需要的看主页，私聊安排' scripts/run_audio_dev.sh
+```
+
+音频识别示例：
+
+```bash
+curl -X POST http://127.0.0.1:8020/infer/audio \
+  -F "file=@demo.wav" \
+  -F "content_id=demo_audio_001"
+```
+
 `/api/image-detector/analyze` 使用 `multipart/form-data` 上传图片，`model_id` 可选：
 
 ```bash
