@@ -1,4 +1,6 @@
 import json
+import importlib.util
+import shutil
 from pathlib import Path
 
 from audio_service.config import settings
@@ -33,7 +35,16 @@ class AudioRiskPipeline:
 
     def info(self) -> dict:
         return {
-            "asr": {"engine": settings.asr_engine, "model_dir": str(settings.asr_model_dir), "language": settings.asr_language, "device": settings.asr_device},
+            "asr": {
+                "engine": settings.asr_engine,
+                "model_dir": str(settings.asr_model_dir),
+                "language": settings.asr_language,
+                "device": settings.asr_device,
+                "ffmpeg_available": shutil.which("ffmpeg") is not None,
+                "faster_whisper_available": importlib.util.find_spec("faster_whisper") is not None,
+                "funasr_available": importlib.util.find_spec("funasr") is not None,
+                "mock_transcript_enabled": settings.use_mock_transcript,
+            },
             "rules": {"enabled": True, "dictionaries": ["audio_risk_keywords", "brand_keywords", "whitelist_keywords"]},
         }
 
@@ -49,6 +60,8 @@ class AudioRiskPipeline:
         result = AudioRiskResult(
             content_id=content_id,
             media_type=media_type,
+            asr_engine=settings.asr_engine,
+            transcript_source="mock" if settings.asr_engine == "mock" and asr_result.transcript else "asr" if asr_result.transcript else "empty",
             duration_seconds=duration,
             audio_score=score,
             risk_level=level,

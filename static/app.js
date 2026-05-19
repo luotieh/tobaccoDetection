@@ -266,6 +266,7 @@ async function runTextTest() {
       `文本风险分：${Number(result.text_score || 0).toFixed(4)}`,
       `风险类型：${(result.risk_types || []).join("、") || "-"}`,
       `命中词：${(result.hit_keywords || []).map(x => x.word || x.text).filter(Boolean).join("、") || "-"}`,
+      `解释：${result.explanation || "-"}`,
       `模型版本：${result.model_version || "-"}`,
     ].join("\n");
     $("#textRaw").textContent = JSON.stringify(result, null, 2);
@@ -343,11 +344,14 @@ async function runAudioTest() {
     $("#audioSummary").textContent = [
       `内容编号：${result.content_id}`,
       `媒体类型：${result.media_type}`,
+      `ASR引擎：${result.asr_engine || "-"}`,
+      `转写来源：${result.transcript_source || "-"}`,
       `风险等级：${result.risk_level}`,
       `语音风险分：${Number(result.audio_score || 0).toFixed(4)}`,
       `转写文本：${result.transcript || "-"}`,
       `命中词：${(result.hit_keywords || []).map(x => x.word).filter(Boolean).join("、") || "-"}`,
       `证据片段：${(result.evidence_segments || []).length}`,
+      `解释：${result.explanation || "-"}`,
       `模型版本：${result.model_version || "-"}`,
     ].join("\n");
     $("#audioRaw").textContent = JSON.stringify(result, null, 2);

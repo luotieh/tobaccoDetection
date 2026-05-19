@@ -5,7 +5,7 @@ from audio_service.services.asr_base import BaseASR
 
 class MockASR(BaseASR):
     def transcribe(self, audio_path: str, duration: float = 0.0) -> ASRResult:
-        text = settings.mock_transcript
+        text = settings.mock_transcript if settings.use_mock_transcript else ""
         if not text:
             return ASRResult(transcript="", segments=[], language=settings.asr_language)
         end = max(duration, 1.0)

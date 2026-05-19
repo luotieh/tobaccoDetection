@@ -11,4 +11,4 @@ def explain(hits: list[AudioKeywordHit], brands: list[BrandEntity]) -> str:
         return "语音转写文本命中白名单语境，风险降低。"
     if hits:
         return "语音转写文本命中烟草相关关键词，建议复核。"
-    return "未发现明显语音交易风险。"
+    return "未获得可分析的语音转写文本；请配置真实 ASR 引擎后再判断音频内容风险。"

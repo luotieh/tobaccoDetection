@@ -44,6 +44,8 @@ class EvidenceSegment(BaseModel):
 class AudioRiskResult(BaseModel):
     content_id: str
     media_type: str
+    asr_engine: str = "mock"
+    transcript_source: str = "empty"
     duration_seconds: float
     audio_score: float
     risk_level: str

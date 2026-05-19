@@ -41,6 +41,7 @@ class Settings:
     asr_language = os.environ.get("ASR_LANGUAGE", "zh")
     asr_device = os.environ.get("ASR_DEVICE", "cpu")
     asr_compute_type = os.environ.get("ASR_COMPUTE_TYPE", "int8")
+    use_mock_transcript = env_bool("USE_MOCK_TRANSCRIPT", False)
     mock_transcript = os.environ.get("MOCK_TRANSCRIPT", "")
     max_media_seconds = env_int("MAX_MEDIA_SECONDS", 300)
     max_file_size_mb = env_int("MAX_FILE_SIZE_MB", 200)

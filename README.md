@@ -270,11 +270,13 @@ POST /infer/audio
 POST /infer/video-audio
 ```
 
-Mock ASR 默认返回空转写；可通过环境变量提供演示转写：
+Mock ASR 默认返回空转写，不会把演示文本当作上传音频的真实内容。只有显式开启 `USE_MOCK_TRANSCRIPT=true` 时，才会使用环境变量提供演示转写：
 
 ```bash
-MOCK_TRANSCRIPT='刚到一批，需要的看主页，私聊安排' scripts/run_audio_dev.sh
+USE_MOCK_TRANSCRIPT=true MOCK_TRANSCRIPT='刚到一批，需要的看主页，私聊安排' scripts/run_audio_dev.sh
 ```
+
+要识别上传音频的真实语音内容，需要安装并配置真实 ASR 引擎，例如 `ASR_ENGINE=whisper` 配合 `faster-whisper` 模型，或 `ASR_ENGINE=funasr` 配合 FunASR 模型。
 
 音频识别示例：
 
