@@ -135,6 +135,19 @@ td { color: #26364d; }
   max-height: 520px;
   object-fit: contain;
 }
+.media-preview {
+  margin-top: 12px;
+  display: grid;
+  place-items: start;
+}
+.media-preview img {
+  max-width: min(100%, 520px);
+  max-height: 320px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  object-fit: contain;
+  background: #fff;
+}
 
 .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .form-grid .full { grid-column: 1 / -1; }

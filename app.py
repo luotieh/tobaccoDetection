@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import base64
 import cgi
+import http.client
 import json
 import os
 import random
@@ -8,6 +9,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import uuid
 from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -35,6 +37,7 @@ MODEL_REGISTRY = {
     },
 }
 DEFAULT_DETECTOR_MODEL_ID = os.environ.get("SMOKING_DETECTOR_MODEL", "basant-yolo26s")
+VISION_SERVICE_URL = os.environ.get("VISION_SERVICE_URL", "http://127.0.0.1:9000")
 _YOLO_MODELS = {}
 
 
@@ -290,6 +293,127 @@ def analyze_image(payload):
     }
 
 
+def resolve_media_path(media_url):
+    if not media_url:
+        return None
+    parsed = urlparse(media_url)
+    if parsed.scheme in {"http", "https"}:
+        return None
+    raw_path = parsed.path if parsed.scheme else media_url
+    path = Path(raw_path)
+    candidates = []
+    if path.is_absolute():
+        candidates.append(path)
+    else:
+        candidates.extend([ROOT / raw_path.lstrip("/"), ROOT / "static" / raw_path.lstrip("/")])
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved.exists() and resolved.is_file():
+            return resolved
+    return None
+
+
+def call_vision_image_service(content_id, image_path, conf=0.35):
+    parsed = urlparse(VISION_SERVICE_URL)
+    if parsed.scheme not in {"http", "https"}:
+        raise RuntimeError("VISION_SERVICE_URL 仅支持 http/https")
+    boundary = f"----tobacco-{uuid.uuid4().hex}"
+    data = image_path.read_bytes()
+    fields = [
+        ("content_id", content_id.encode("utf-8"), None),
+        ("conf", str(conf).encode("utf-8"), None),
+        ("save_evidence", b"true", None),
+        ("file", data, image_path.name),
+    ]
+    body = bytearray()
+    for name, value, filename in fields:
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        if filename:
+            body.extend(f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode("utf-8"))
+            body.extend(b"Content-Type: application/octet-stream\r\n\r\n")
+        else:
+            body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+        body.extend(value)
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+    conn_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    conn = conn_cls(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), timeout=30)
+    try:
+        conn.request(
+            "POST",
+            f"{parsed.path.rstrip('/')}/infer/image" if parsed.path else "/infer/image",
+            body=bytes(body),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "Content-Length": str(len(body))},
+        )
+        resp = conn.getresponse()
+        raw = resp.read().decode("utf-8")
+        if resp.status >= 400:
+            raise RuntimeError(raw or f"视觉服务返回 HTTP {resp.status}")
+        return json.loads(raw)
+    finally:
+        conn.close()
+
+
+def visual_result_to_image_result(visual_result, evidence_frame):
+    detections = visual_result.get("detected_objects") or []
+    ocr_items = visual_result.get("ocr_text") or []
+    brands = visual_result.get("brand_results") or []
+    return {
+        "image_risk_score": float(visual_result.get("visual_score") or 0),
+        "detected_objects": [item.get("label_zh") or item.get("class_name") for item in detections],
+        "brand": "、".join(item.get("brand", "") for item in brands if item.get("brand")) or "未识别",
+        "ocr_text": [item.get("text", "") for item in ocr_items if item.get("text")],
+        "confidence": max([float(item.get("confidence") or 0) for item in detections], default=float(visual_result.get("visual_score") or 0)),
+        "evidence_frame": evidence_frame,
+        "scene_tags": visual_result.get("scene_tags") or [],
+        "risk_level": visual_result.get("risk_level", "none"),
+        "visual_score": visual_result.get("visual_score", 0),
+        "visual_service_result": visual_result,
+        "model_version": visual_result.get("model_version", "vision-tobacco-v0.1.0"),
+    }
+
+
+def yolo_result_to_image_result(yolo_result, evidence_frame):
+    detections = yolo_result.get("detections") or []
+    return {
+        "image_risk_score": float(yolo_result.get("image_risk_score") or 0),
+        "detected_objects": yolo_result.get("detected_objects") or [],
+        "brand": "未识别",
+        "ocr_text": [],
+        "confidence": float(yolo_result.get("confidence") or 0),
+        "evidence_frame": evidence_frame,
+        "detections": detections,
+        "model_id": yolo_result.get("model_id"),
+        "model_name": yolo_result.get("model_name"),
+        "model_version": yolo_result.get("model_version", "Smoking-detection-YOLO26s/best.pt"),
+    }
+
+
+def analyze_image_with_vision(payload):
+    media_path = resolve_media_path(payload.get("image_url"))
+    if not media_path:
+        return analyze_image(payload)
+    content_id = payload.get("content_id") or new_id("IMG")
+    evidence_frame = str(media_path)
+    try:
+        visual_result = call_vision_image_service(content_id, media_path, conf=float(payload.get("conf") or 0.35))
+        return visual_result_to_image_result(visual_result, evidence_frame)
+    except Exception as exc:
+        try:
+            yolo_result = yolo_detect_image(media_path.read_bytes(), filename=media_path.name, conf=float(payload.get("conf") or 0.5), model_id=payload.get("model_id"))
+            result = yolo_result_to_image_result(yolo_result, evidence_frame)
+            result["vision_fallback_reason"] = str(exc)
+            return result
+        except Exception as inner_exc:
+            result = analyze_image(payload)
+            result["vision_fallback_reason"] = str(exc)
+            result["yolo_fallback_reason"] = str(inner_exc)
+            return result
+
+
 def detector_model_info(model_id, cfg):
     path = cfg["path"]
     return {
@@ -473,7 +597,7 @@ def recognize_content(content_id):
         image_result = None
         audio_result = None
         if content["media_url"] or content["content_type"] in {"图片", "视频"}:
-            image_result = analyze_image({"content_id": content_id, "image_url": content["media_url"]})
+            image_result = analyze_image_with_vision({"content_id": content_id, "image_url": content["media_url"]})
             image_score = image_result["image_risk_score"]
         if content["content_type"] == "视频":
             audio_result = analyze_audio({"content_id": content_id, "audio_url": content["media_url"]})

@@ -260,7 +260,7 @@ function openContentForm() {
       <label><span>账号名称</span><input id="f_account" value="演示账号" /></label>
       <label><span>原始链接</span><input id="f_url" value="https://example.com/demo" /></label>
       <label class="full"><span>文本内容</span><textarea id="f_text">今天刚到一批，想要的私信我。</textarea></label>
-      <label class="full"><span>媒体地址</span><input id="f_media" value="/mock/images/cigarette_demo.jpg" /></label>
+      <label class="full"><span>媒体地址</span><input id="f_media" value="/tmp/vision-demo.jpg" placeholder="本地图片路径或静态资源路径" /></label>
     </div>
     <div class="dialog-actions"><button class="secondary" onclick="closeModal()">取消</button><button onclick="saveContent()">保存</button></div>
   `);
@@ -303,7 +303,7 @@ async function renderDetail(id) {
       </div></div>
       <div class="panel"><h3 class="section-title">多模态融合结果</h3>${resultBox(byType.fusion, "fusion")}</div>
     </div>
-    <div class="panel"><h3 class="section-title">原始内容</h3><div class="pre">${c.raw_text || "暂无文本"}\n${c.media_url ? "媒体地址：" + c.media_url : ""}</div></div>
+    <div class="panel"><h3 class="section-title">原始内容</h3><div class="pre">${c.raw_text || "暂无文本"}\n${c.media_url ? "媒体地址：" + c.media_url : ""}</div>${mediaPreview(c.media_url)}</div>
     <div class="grid-3">
       <div class="panel"><h3 class="section-title">文本识别结果</h3>${resultBox(byType.text)}</div>
       <div class="panel"><h3 class="section-title">图像识别结果</h3>${resultBox(byType.image)}</div>
@@ -314,6 +314,14 @@ async function renderDetail(id) {
       <div class="panel"><h3 class="section-title">推送日志</h3>${simpleList(detail.push_logs, r => `${statusText(r.push_status)}｜${r.report_id || "-"}｜重试 ${r.retry_count}<br>${r.error_message || r.push_time || ""}`)}</div>
     </div>
   `;
+}
+
+function mediaPreview(mediaUrl) {
+  if (!mediaUrl) return "";
+  if (/^https?:\/\//.test(mediaUrl) || /\.(jpg|jpeg|png|webp|bmp)$/i.test(mediaUrl)) {
+    return `<div class="media-preview"><img src="${mediaUrl}" alt="媒体预览" onerror="this.parentElement.style.display='none'"></div>`;
+  }
+  return "";
 }
 
 function resultBox(obj, type) {

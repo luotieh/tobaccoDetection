@@ -119,6 +119,12 @@ weights/
 
 环境变量见 `.env.example`。默认优先加载 `models/best.pt`；如果 `USE_MOCK_MODEL=true` 或权重不存在，会进入 Mock 模式，仍能跑通上传和评分流程。
 
+现有管理后台已经接入视觉服务：在“识别内容列表”执行识别时，如果内容的 `media_url` 指向本地图片文件，会优先调用 `VISION_SERVICE_URL` 的 `/infer/image`，并将返回的 `visual_score`、检测对象、OCR、品牌和证据结果写入内容详情的图像识别结果；视觉服务不可用时自动回退到管理后台内置 YOLO，再回退 Mock 结果。
+
+```bash
+VISION_SERVICE_URL=http://127.0.0.1:9000 python3 app.py
+```
+
 健康检查：
 
 ```bash
