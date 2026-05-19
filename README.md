@@ -2,7 +2,7 @@
 
 这是根据 `docs/DEMO_SPEC.md` 生成的可运行 Demo。后端使用 Python 标准库实现 HTTP API 与 SQLite 数据存储，前端为后端直接托管的管理后台单页应用。
 
-仓库内同时根据 `docs/tobacco_vision_codex_spec.md` 增加了 FastAPI 视觉识别服务原型 `tobacco-vision-risk-service`，用于图片/视频烟草视觉风险识别。
+仓库内同时根据 `docs/tobacco_vision_codex_spec.md`、`docs/tobacco_text_audio_implementation_plan.md` 增加了 FastAPI 视觉、文本、语音识别服务，用于图片/视频、文本内容和音视频口播的烟草违法交易风险识别。
 
 ## 功能范围
 
@@ -13,6 +13,8 @@
 - 规则管理：维护关键词、黑话、品牌词、白名单、地域词。
 - Mock 模型接口：文本、图像、语音、融合评分接口。
 - 图像识别测试：上传图片调用 Hugging Face `basant18/Smoking-detection-YOLO26s` 或 `Enos-123/smoking-detection` 的 `best.pt` 做 YOLO 目标检测，并支持前端切换模型。
+- 文本识别测试：调用文本风险服务识别标题、正文、评论、OCR/ASR 转写文本。
+- 语音识别测试：上传音频或视频，调用语音服务完成 ASR 转写、规则识别、评分和证据片段输出。
 - 人工审核：确认违法、误报、暂存观察、忽略。
 - 推送管理：线索加入推送队列，模拟推送监管平台，查看推送日志。
 
@@ -20,6 +22,7 @@
 
 - Python 3.10+
 - 图像识别依赖 `ultralytics`、`opencv-python`
+- 文本/语音服务依赖 `fastapi`、`uvicorn`、`python-multipart`；语音真实媒体处理建议安装 FFmpeg。
 
 ## 启动
 
@@ -53,6 +56,27 @@ uvicorn app.main:app --host 0.0.0.0 --port 9000 --reload
 
 ```bash
 HOST=0.0.0.0 PORT=9000 scripts/run_dev.sh
+```
+
+文本识别服务：
+
+```bash
+TEXT_PORT=8010 scripts/run_text_dev.sh
+```
+
+语音识别服务：
+
+```bash
+AUDIO_PORT=8020 scripts/run_audio_dev.sh
+```
+
+管理后台可以通过同源代理调用三个识别服务：
+
+```bash
+VISION_SERVICE_URL=http://127.0.0.1:9000 \
+TEXT_SERVICE_URL=http://127.0.0.1:8010 \
+AUDIO_SERVICE_URL=http://127.0.0.1:8020 \
+python3 app.py 8000
 ```
 
 首次启动会自动创建 SQLite 数据库：
@@ -98,6 +122,14 @@ POST   /api/mock/regulatory-platform/push
 
 GET    /api/image-detector/status
 POST   /api/image-detector/analyze
+
+GET    /api/text-service/status
+POST   /api/text-service/infer-text
+POST   /api/text-service/infer-content
+
+GET    /api/audio-service/status
+POST   /api/audio-service/infer-audio
+POST   /api/audio-service/infer-video-audio
 ```
 
 ## 视觉识别服务
@@ -186,9 +218,44 @@ pytest
 
 后续扩展方向：接入 CLIP/VLM 场景理解、烟盒 ROI 品牌分类、PaddleOCR 增强、ONNX/TensorRT 加速、队列异步推理和审核反馈闭环。
 
+## 文本识别服务
+
+`text_service` 根据落地方案提供可运行文本风险服务，默认端口 `8010`。当前实现包含公共归一化、词库加载、关键词匹配、实体抽取、联系方式脱敏、Mock/可选 Transformers 分类器、风险评分和解释生成。
+
+```bash
+TEXT_PORT=8010 scripts/run_text_dev.sh
+```
+
+主要接口：
+
+```text
+GET  /health
+GET  /models/info
+GET  /dictionaries
+POST /infer/text
+POST /infer/content
+POST /infer/batch
+```
+
+单条文本识别示例：
+
+```bash
+curl -X POST http://127.0.0.1:8010/infer/text \
+  -H "Content-Type: application/json" \
+  -d '{"content_id":"demo_text_001","source":"comment","text":"刚到一批，懂的私聊，主页有方式"}'
+```
+
+白名单语境示例：
+
+```bash
+curl -X POST http://127.0.0.1:8010/infer/text \
+  -H "Content-Type: application/json" \
+  -d '{"content_id":"demo_text_002","source":"title","text":"控烟宣传活动，未成年人禁止吸烟"}'
+```
+
 ## 语音识别服务
 
-`audio` 分支根据 `docs/tobacco_audio_codex_spec.md` 提供独立的 FastAPI 语音风险服务，包名为 `audio_service`，默认端口 `8020`。
+`audio_service` 根据落地方案提供独立 FastAPI 语音风险服务，默认端口 `8020`。当前实现支持上传音频/视频、FFmpeg 抽音频与转码、Mock ASR、可选 faster-whisper/FunASR 适配、关键词识别、语音评分、联系方式脱敏和证据片段导出。
 
 ```bash
 AUDIO_PORT=8020 scripts/run_audio_dev.sh

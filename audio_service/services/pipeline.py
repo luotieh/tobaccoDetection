@@ -4,6 +4,7 @@ from pathlib import Path
 from audio_service.config import settings
 from audio_service.schemas import AudioRiskResult
 from audio_service.services.asr_external import ExternalASR
+from audio_service.services.asr_funasr import FunASRASR
 from audio_service.services.asr_mock import MockASR
 from audio_service.services.asr_whisper import WhisperASR
 from audio_service.services.audio_preprocess import AudioPreprocessor
@@ -11,7 +12,8 @@ from audio_service.services.evidence import build_evidence
 from audio_service.services.explanation import explain
 from audio_service.services.keyword_matcher import AudioKeywordMatcher
 from audio_service.services.media import MediaService
-from audio_service.services.scoring import score_audio
+from audio_service.services.scoring import score_audio_with_types
+from common.utils.entity_extractor import EntityExtractor
 
 
 class AudioRiskPipeline:
@@ -19,8 +21,11 @@ class AudioRiskPipeline:
         self.media = MediaService()
         self.preprocess = AudioPreprocessor()
         self.matcher = AudioKeywordMatcher()
+        self.extractor = EntityExtractor()
         if settings.asr_engine == "whisper":
             self.asr = WhisperASR()
+        elif settings.asr_engine == "funasr":
+            self.asr = FunASRASR()
         elif settings.asr_engine == "external":
             self.asr = ExternalASR()
         else:
@@ -38,18 +43,21 @@ class AudioRiskPipeline:
         asr_result = self.asr.transcribe(str(audio_path), duration)
         hits = self.matcher.match(asr_result.segments, asr_result.transcript)
         brands = self.matcher.match_brands(asr_result.transcript)
-        score, level = score_audio(hits, brands)
-        evidence = build_evidence(content_id, asr_result.segments, hits) if save_evidence else []
+        contacts = self.extractor.extract_contacts(asr_result.transcript)
+        score, level, risk_types = score_audio_with_types(hits, brands, contacts)
+        evidence = build_evidence(content_id, asr_result.segments, hits, str(audio_path)) if save_evidence else []
         result = AudioRiskResult(
             content_id=content_id,
             media_type=media_type,
             duration_seconds=duration,
             audio_score=score,
             risk_level=level,
+            risk_types=risk_types,
             transcript=asr_result.transcript,
             segments=asr_result.segments,
             hit_keywords=hits,
             brand_entities=brands,
+            contact_entities=contacts,
             evidence_segments=evidence,
             explanation=explain(hits, brands),
         )

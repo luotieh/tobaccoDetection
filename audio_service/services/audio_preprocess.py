@@ -1,3 +1,5 @@
+import shutil
+import subprocess
 from pathlib import Path
 
 from audio_service.config import settings
@@ -8,6 +10,15 @@ class AudioPreprocessor:
     def to_16k_mono(self, media_path: Path, content_id: str) -> Path:
         target_dir = ensure_dir(settings.resolve(settings.audio_dir) / content_id)
         target = target_dir / "audio_16k_mono.wav"
+        if shutil.which("ffmpeg"):
+            proc = subprocess.run(
+                ["ffmpeg", "-y", "-i", str(media_path), "-ac", "1", "-ar", str(settings.audio_sample_rate), str(target)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode == 0:
+                return target
         if media_path.suffix.lower() == ".wav":
             target.write_bytes(media_path.read_bytes())
         else:

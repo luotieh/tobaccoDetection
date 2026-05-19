@@ -18,7 +18,7 @@ class AudioKeywordMatcher:
             for category, words in {**self.risk, **self.whitelist}.items():
                 for word in words:
                     if word.lower() in text:
-                        hits.append(AudioKeywordHit(word=word, category=category, start_time=segment.start, end_time=segment.end, segment_text=segment.text))
+                        hits.append(AudioKeywordHit(word=word, normalized_word=word, category=category, dictionary="audio_risk_keywords" if category not in {"anti_smoking", "news", "education"} else "whitelist_keywords", start_time=segment.start, end_time=segment.end, segment_text=segment.text))
         return hits
 
     def match_brands(self, transcript: str) -> list[BrandEntity]:

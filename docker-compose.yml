@@ -1,0 +1,25 @@
+services:
+  text-risk-service:
+    build:
+      context: .
+      dockerfile: text_service/Dockerfile
+    ports:
+      - "8010:8010"
+    env_file:
+      - .env
+    volumes:
+      - ./storage:/app/storage
+      - ./models:/app/models
+
+  audio-risk-service:
+    build:
+      context: .
+      dockerfile: audio_service/Dockerfile
+    ports:
+      - "8020:8020"
+    env_file:
+      - .env
+    volumes:
+      - ./storage:/app/storage
+      - ./models:/app/models
+

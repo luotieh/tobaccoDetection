@@ -1,3 +1,6 @@
+import json
+import shutil
+import subprocess
 import wave
 from pathlib import Path
 
@@ -10,7 +13,12 @@ class MediaService:
     video_exts = {"mp4", "mov", "avi", "mkv"}
 
     def save_upload(self, data: bytes, filename: str, content_id: str) -> Path:
+        max_bytes = settings.max_file_size_mb * 1024 * 1024
+        if len(data) > max_bytes:
+            raise ValueError("FILE_TOO_LARGE")
         ext = Path(filename or "upload.bin").suffix.lower().lstrip(".") or "bin"
+        if ext not in self.audio_exts | self.video_exts:
+            raise ValueError("INVALID_FILE_TYPE")
         path = ensure_dir(settings.resolve(settings.upload_dir)) / new_name(content_id, ext)
         path.write_bytes(data)
         return path
@@ -27,14 +35,38 @@ class MediaService:
         if path.suffix.lower() == ".wav":
             try:
                 with wave.open(str(path), "rb") as fh:
-                    return round(fh.getnframes() / float(fh.getframerate() or settings.audio_sample_rate), 3)
+                    duration = round(fh.getnframes() / float(fh.getframerate() or settings.audio_sample_rate), 3)
+                    if duration > settings.max_media_seconds:
+                        raise ValueError("MEDIA_TOO_LONG")
+                    return duration
             except wave.Error:
                 return 0.0
+        if shutil.which("ffprobe"):
+            proc = subprocess.run(
+                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode == 0:
+                duration = round(float(json.loads(proc.stdout).get("format", {}).get("duration") or 0.0), 3)
+                if duration > settings.max_media_seconds:
+                    raise ValueError("MEDIA_TOO_LONG")
+                return duration
         return 0.0
 
     def extract_audio_from_video(self, video_path: Path, content_id: str) -> Path:
-        # Prototype fallback: store the uploaded video path as the ASR input when FFmpeg is unavailable.
         target_dir = ensure_dir(settings.resolve(settings.audio_dir) / content_id)
         target = target_dir / "audio_16k_mono.wav"
-        target.write_bytes(b"")
+        if shutil.which("ffmpeg"):
+            proc = subprocess.run(
+                ["ffmpeg", "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", str(settings.audio_sample_rate), str(target)],
+                capture_output=True,
+                text=True,
+                check=False,
+            )
+            if proc.returncode != 0:
+                raise RuntimeError(f"FFmpeg audio extraction failed: {proc.stderr[-500:]}")
+        else:
+            target.write_bytes(b"")
         return target
