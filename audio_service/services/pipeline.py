@@ -1,6 +1,5 @@
 import json
 import importlib.util
-import shutil
 from pathlib import Path
 
 from audio_service.config import settings
@@ -15,6 +14,7 @@ from audio_service.services.explanation import explain
 from audio_service.services.keyword_matcher import AudioKeywordMatcher
 from audio_service.services.media import MediaService
 from audio_service.services.scoring import score_audio_with_types
+from audio_service.utils.ffmpeg import ffmpeg_available
 from common.utils.entity_extractor import EntityExtractor
 
 
@@ -40,7 +40,7 @@ class AudioRiskPipeline:
                 "model_dir": str(settings.asr_model_dir),
                 "language": settings.asr_language,
                 "device": settings.asr_device,
-                "ffmpeg_available": shutil.which("ffmpeg") is not None,
+                "ffmpeg_available": ffmpeg_available(),
                 "faster_whisper_available": importlib.util.find_spec("faster_whisper") is not None,
                 "funasr_available": importlib.util.find_spec("funasr") is not None,
                 "mock_transcript_enabled": settings.use_mock_transcript,

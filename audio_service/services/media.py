@@ -1,11 +1,11 @@
 import json
-import shutil
 import subprocess
 import wave
 from pathlib import Path
 
 from audio_service.config import settings
 from audio_service.utils.file_utils import ensure_dir, new_name
+from audio_service.utils.ffmpeg import ffmpeg_path, ffprobe_path
 
 
 class MediaService:
@@ -41,9 +41,10 @@ class MediaService:
                     return duration
             except wave.Error:
                 return 0.0
-        if shutil.which("ffprobe"):
+        probe = ffprobe_path()
+        if probe:
             proc = subprocess.run(
-                ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)],
+                [probe, "-v", "error", "-show_entries", "format=duration", "-of", "json", str(path)],
                 capture_output=True,
                 text=True,
                 check=False,
@@ -58,9 +59,10 @@ class MediaService:
     def extract_audio_from_video(self, video_path: Path, content_id: str) -> Path:
         target_dir = ensure_dir(settings.resolve(settings.audio_dir) / content_id)
         target = target_dir / "audio_16k_mono.wav"
-        if shutil.which("ffmpeg"):
+        ffmpeg = ffmpeg_path()
+        if ffmpeg:
             proc = subprocess.run(
-                ["ffmpeg", "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", str(settings.audio_sample_rate), str(target)],
+                [ffmpeg, "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", str(settings.audio_sample_rate), str(target)],
                 capture_output=True,
                 text=True,
                 check=False,
