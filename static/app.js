@@ -1,7 +1,7 @@
 const state = { route: "dashboard", data: null };
 
 const menus = [
-  ["核心功能", [["dashboard", "工作台"], ["contents", "识别内容列表"], ["image-test", "图像识别测试"]]],
+  ["核心功能", [["dashboard", "工作台"], ["contents", "识别内容列表"], ["image-test", "图像识别测试"], ["text-test", "文本识别测试"], ["audio-test", "语音识别测试"]]],
   ["配置管理", [["models", "模型配置"], ["fusion", "多模态融合配置"], ["rules", "规则词库"]]],
   ["业务闭环", [["reviews", "审核管理"], ["push", "推送管理"], ["users", "用户角色"]]],
 ];
@@ -10,6 +10,8 @@ const titles = {
   dashboard: ["工作台", "数据概览与线索趋势"],
   contents: ["识别内容列表", "管理待识别内容并执行 Mock 识别"],
   "image-test": ["图像识别测试", "上传图片调用 best.pt 目标检测接口"],
+  "text-test": ["文本识别测试", "调用文本风险服务识别标题、正文、评论和 OCR/ASR 文本"],
+  "audio-test": ["语音识别测试", "上传音频或视频调用语音风险服务"],
   detail: ["内容详情", "查看三模态识别结果、融合评分和审核动作"],
   models: ["模型配置", "配置文本、图像、语音与融合模型"],
   fusion: ["多模态融合配置", "调整权重和风险等级阈值"],
@@ -217,6 +219,146 @@ async function runImageDetector() {
 function detectionsTable(rows) {
   if (!rows.length) return `<div class="pre">未检出目标</div>`;
   return `<table><thead><tr><th>类别</th><th>置信度</th><th>坐标</th></tr></thead><tbody>${rows.map(r => `<tr><td>${r.class_name}</td><td>${Number(r.confidence).toFixed(4)}</td><td>${r.box.x1}, ${r.box.y1}, ${r.box.x2}, ${r.box.y2}</td></tr>`).join("")}</tbody></table>`;
+}
+
+async function renderTextTest() {
+  const status = await api("/api/text-service/status");
+  const model = status.models || {};
+  $("#view").innerHTML = `
+    <div class="panel">
+      <h3 class="section-title">服务状态 <span class="tag green">${status.health.status || "ok"}</span></h3>
+      <div class="kv">
+        <b>服务地址</b><span>${status.base_url}</span>
+        <b>应用名称</b><span>${status.health.app || "-"}</span>
+        <b>版本</b><span>${status.health.version || model.version || "-"}</span>
+        <b>模型目录</b><span>${model.model_dir || "-"}</span>
+      </div>
+    </div>
+    <div class="panel">
+      <h3 class="section-title">单条文本测试</h3>
+      <div class="form-grid">
+        <label><span>内容编号</span><input id="textContentId" value="txt_ui_001" /></label>
+        <label><span>来源</span><select id="textSource"><option value="comment">comment</option><option value="title">title</option><option value="ocr">ocr</option><option value="asr">asr</option><option value="profile">profile</option></select></label>
+        <label class="full"><span>文本内容</span><textarea id="textInput">刚到一批，懂的私聊，主页有方式</textarea></label>
+      </div>
+      <div class="dialog-actions"><button id="textBtn" onclick="runTextTest()">开始识别</button></div>
+    </div>
+    <div class="grid-2">
+      <div class="panel"><h3 class="section-title">识别摘要</h3><div id="textSummary" class="result-box pre">暂无结果</div></div>
+      <div class="panel"><h3 class="section-title">完整响应</h3><div id="textRaw" class="result-box pre">暂无结果</div></div>
+    </div>
+  `;
+}
+
+async function runTextTest() {
+  const btn = $("#textBtn");
+  btn.disabled = true;
+  btn.textContent = "识别中";
+  try {
+    const result = await api("/api/text-service/infer-text", { method: "POST", body: {
+      content_id: $("#textContentId").value || "txt_ui_001",
+      source: $("#textSource").value || "comment",
+      text: $("#textInput").value || "",
+    }});
+    $("#textSummary").textContent = [
+      `内容编号：${result.content_id}`,
+      `风险等级：${result.risk_level}`,
+      `文本风险分：${Number(result.text_score || 0).toFixed(4)}`,
+      `风险类型：${(result.risk_types || []).join("、") || "-"}`,
+      `命中词：${(result.hit_keywords || []).map(x => x.word || x.text).filter(Boolean).join("、") || "-"}`,
+      `模型版本：${result.model_version || "-"}`,
+    ].join("\n");
+    $("#textRaw").textContent = JSON.stringify(result, null, 2);
+    toast("文本识别完成");
+  } catch (err) {
+    $("#textSummary").textContent = err.message;
+    toast("文本识别失败");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "开始识别";
+  }
+}
+
+async function renderAudioTest() {
+  const status = await api("/api/audio-service/status");
+  const model = status.models || {};
+  $("#view").innerHTML = `
+    <div class="panel">
+      <h3 class="section-title">服务状态 <span class="tag green">${status.health.status || "ok"}</span></h3>
+      <div class="kv">
+        <b>服务地址</b><span>${status.base_url}</span>
+        <b>应用名称</b><span>${status.health.app || "-"}</span>
+        <b>版本</b><span>${status.health.version || model.version || "-"}</span>
+        <b>ASR 类型</b><span>${model.asr_backend || model.asr_type || "-"}</span>
+      </div>
+    </div>
+    <div class="panel">
+      <h3 class="section-title">上传测试</h3>
+      <div class="detector-grid">
+        <div class="detector-form">
+          <label><span>识别类型</span><select id="audioMode"><option value="audio">音频文件</option><option value="video">视频音轨</option></select></label>
+          <label><span>内容编号</span><input id="audioContentId" value="audio_ui_001" /></label>
+          <label><span>媒体文件</span><input id="audioFile" type="file" accept="audio/*,video/*" /></label>
+          <label><span>保存证据片段</span><select id="audioEvidence"><option value="true">保存</option><option value="false">不保存</option></select></label>
+          <div class="dialog-actions"><button id="audioBtn" onclick="runAudioTest()">开始识别</button></div>
+        </div>
+        <div class="detector-preview audio-preview" id="audioPreview">请选择音频或视频文件</div>
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="panel"><h3 class="section-title">识别摘要</h3><div id="audioSummary" class="result-box pre">暂无结果</div></div>
+      <div class="panel"><h3 class="section-title">完整响应</h3><div id="audioRaw" class="result-box pre">暂无结果</div></div>
+    </div>
+  `;
+  $("#audioFile").addEventListener("change", previewAudioFile);
+}
+
+function previewAudioFile() {
+  const file = $("#audioFile").files[0];
+  if (!file) {
+    $("#audioPreview").textContent = "请选择音频或视频文件";
+    return;
+  }
+  const url = URL.createObjectURL(file);
+  if (file.type.startsWith("video/")) {
+    $("#audioPreview").innerHTML = `<video src="${url}" controls></video>`;
+  } else {
+    $("#audioPreview").innerHTML = `<audio src="${url}" controls></audio><div class="pre">${file.name}</div>`;
+  }
+}
+
+async function runAudioTest() {
+  const file = $("#audioFile").files[0];
+  if (!file) return toast("请先选择媒体文件");
+  const btn = $("#audioBtn");
+  btn.disabled = true;
+  btn.textContent = "识别中";
+  try {
+    const form = new FormData();
+    form.append("file", file);
+    form.append("content_id", $("#audioContentId").value || "audio_ui_001");
+    form.append("save_evidence", $("#audioEvidence").value || "true");
+    const endpoint = $("#audioMode").value === "video" ? "/api/audio-service/infer-video-audio" : "/api/audio-service/infer-audio";
+    const result = await apiForm(endpoint, form);
+    $("#audioSummary").textContent = [
+      `内容编号：${result.content_id}`,
+      `媒体类型：${result.media_type}`,
+      `风险等级：${result.risk_level}`,
+      `语音风险分：${Number(result.audio_score || 0).toFixed(4)}`,
+      `转写文本：${result.transcript || "-"}`,
+      `命中词：${(result.hit_keywords || []).map(x => x.word).filter(Boolean).join("、") || "-"}`,
+      `证据片段：${(result.evidence_segments || []).length}`,
+      `模型版本：${result.model_version || "-"}`,
+    ].join("\n");
+    $("#audioRaw").textContent = JSON.stringify(result, null, 2);
+    toast("语音识别完成");
+  } catch (err) {
+    $("#audioSummary").textContent = err.message;
+    toast("语音识别失败");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "开始识别";
+  }
 }
 
 function contentsTable(rows) {
@@ -465,6 +607,8 @@ async function renderApp() {
     if (route === "dashboard") await renderDashboard();
     else if (route === "contents") await renderContents();
     else if (route === "image-test") await renderImageTest();
+    else if (route === "text-test") await renderTextTest();
+    else if (route === "audio-test") await renderAudioTest();
     else if (route === "detail") await renderDetail(id);
     else if (route === "models") await renderModels();
     else if (route === "fusion") await renderFusion();

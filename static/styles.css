@@ -135,6 +135,15 @@ td { color: #26364d; }
   max-height: 520px;
   object-fit: contain;
 }
+.audio-preview {
+  align-content: center;
+  gap: 12px;
+}
+.audio-preview audio,
+.audio-preview video {
+  width: min(100%, 720px);
+  max-height: 420px;
+}
 .media-preview {
   margin-top: 12px;
   display: grid;

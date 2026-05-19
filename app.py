@@ -38,6 +38,8 @@ MODEL_REGISTRY = {
 }
 DEFAULT_DETECTOR_MODEL_ID = os.environ.get("SMOKING_DETECTOR_MODEL", "basant-yolo26s")
 VISION_SERVICE_URL = os.environ.get("VISION_SERVICE_URL", "http://127.0.0.1:9000")
+TEXT_SERVICE_URL = os.environ.get("TEXT_SERVICE_URL", "http://127.0.0.1:8010")
+AUDIO_SERVICE_URL = os.environ.get("AUDIO_SERVICE_URL", "http://127.0.0.1:8020")
 _YOLO_MODELS = {}
 
 
@@ -355,6 +357,85 @@ def call_vision_image_service(content_id, image_path, conf=0.35):
         return json.loads(raw)
     finally:
         conn.close()
+
+
+def service_request(base_url, method, path, body=None, content_type=None, timeout=60):
+    parsed = urlparse(base_url)
+    target = path if path.startswith("/") else f"/{path}"
+    if parsed.path and parsed.path != "/":
+        target = parsed.path.rstrip("/") + target
+    conn_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    conn = conn_cls(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), timeout=timeout)
+    headers = {}
+    if content_type:
+        headers["Content-Type"] = content_type
+    try:
+        conn.request(method, target, body=body, headers=headers)
+        resp = conn.getresponse()
+        raw = resp.read().decode("utf-8")
+        data = json.loads(raw) if raw else {}
+        if resp.status >= 400:
+            message = data.get("detail") or data.get("error") or raw or f"HTTP {resp.status}"
+            raise RuntimeError(message)
+        return data
+    finally:
+        conn.close()
+
+
+def service_get(base_url, path, timeout=10):
+    return service_request(base_url, "GET", path, timeout=timeout)
+
+
+def service_post_json(base_url, path, payload, timeout=60):
+    return service_request(
+        base_url,
+        "POST",
+        path,
+        body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        content_type="application/json; charset=utf-8",
+        timeout=timeout,
+    )
+
+
+def service_post_file(base_url, path, file_payload, fields=None, timeout=120):
+    boundary = f"----tobacco-{uuid.uuid4().hex}"
+    parts = []
+    for name, value in (fields or {}).items():
+        parts.append(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode("utf-8")
+        )
+    filename = file_payload["filename"]
+    parts.extend([
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n".encode("utf-8"),
+        b"Content-Type: application/octet-stream\r\n\r\n",
+        file_payload["data"],
+        b"\r\n",
+        f"--{boundary}--\r\n".encode("utf-8"),
+    ])
+    return service_request(
+        base_url,
+        "POST",
+        path,
+        body=b"".join(parts),
+        content_type=f"multipart/form-data; boundary={boundary}",
+        timeout=timeout,
+    )
+
+
+def text_service_status():
+    return {
+        "base_url": TEXT_SERVICE_URL,
+        "health": service_get(TEXT_SERVICE_URL, "/health"),
+        "models": service_get(TEXT_SERVICE_URL, "/models/info"),
+    }
+
+
+def audio_service_status():
+    return {
+        "base_url": AUDIO_SERVICE_URL,
+        "health": service_get(AUDIO_SERVICE_URL, "/health"),
+        "models": service_get(AUDIO_SERVICE_URL, "/models/info"),
+    }
 
 
 def visual_result_to_image_result(visual_result, evidence_frame):
@@ -692,6 +773,32 @@ class Handler(BaseHTTPRequestHandler):
             "model_id": form_value("model_id", DEFAULT_DETECTOR_MODEL_ID),
         }
 
+    def body_multipart_file(self):
+        form = cgi.FieldStorage(
+            fp=self.rfile,
+            headers=self.headers,
+            environ={
+                "REQUEST_METHOD": "POST",
+                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
+            },
+        )
+        upload = form["file"] if "file" in form else None
+        if upload is None or not getattr(upload, "file", None):
+            raise ValueError("缺少 file 文件字段")
+
+        def form_value(name, default=""):
+            return form[name].value if name in form and not getattr(form[name], "filename", None) else default
+
+        return {
+            "file": {
+                "data": upload.file.read(),
+                "filename": upload.filename or "upload.bin",
+            },
+            "content_id": form_value("content_id"),
+            "save_evidence": form_value("save_evidence", "true"),
+        }
+
     def serve_static(self):
         path = urlparse(self.path).path
         file_path = STATIC_DIR / ("index.html" if path in {"/", ""} else path.lstrip("/"))
@@ -723,6 +830,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(rows_to_list(conn.execute("SELECT * FROM model_configs ORDER BY model_type").fetchall()))
             if path == "/api/image-detector/status":
                 return self.send_json(image_detector_status(qs.get("model_id")))
+            if path == "/api/text-service/status":
+                return self.send_json(text_service_status())
+            if path == "/api/audio-service/status":
+                return self.send_json(audio_service_status())
             if path == "/api/fusion-config":
                 return self.send_json(fusion_config())
             if path == "/api/rules":
@@ -741,7 +852,18 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/image-detector/analyze":
                 payload = self.body_multipart_image()
                 return self.send_json(yolo_detect_image(**payload))
+            if path in {"/api/audio-service/infer-audio", "/api/audio-service/infer-video-audio"}:
+                payload = self.body_multipart_file()
+                service_path = "/infer/audio" if path.endswith("infer-audio") else "/infer/video-audio"
+                fields = {"save_evidence": payload["save_evidence"]}
+                if payload["content_id"]:
+                    fields["content_id"] = payload["content_id"]
+                return self.send_json(service_post_file(AUDIO_SERVICE_URL, service_path, payload["file"], fields))
             payload = self.body_json()
+            if path == "/api/text-service/infer-text":
+                return self.send_json(service_post_json(TEXT_SERVICE_URL, "/infer/text", payload))
+            if path == "/api/text-service/infer-content":
+                return self.send_json(service_post_json(TEXT_SERVICE_URL, "/infer/content", payload))
             if path == "/api/contents":
                 return self.send_json(api_create_content(payload), 201)
             if m := re.match(r"^/api/contents/([^/]+)/recognize$", path):
