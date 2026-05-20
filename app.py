@@ -160,10 +160,10 @@ CREATE TABLE IF NOT EXISTS push_logs (
 
 
 MODELS = [
-    ("m_text_001", "文本交易意图识别模型", "text", "text-risk-v1.0", "/api/mock/text/analyze", 0.70, 30, 1, "识别标题、评论、账号简介中的违法售烟关键词和交易意图"),
+    ("m_text_001", "文本交易意图识别模型", "text", "text-risk-v0.1.0", "/api/text-service/infer-content", 0.70, 30, 1, "调用文本风险服务识别标题、正文、评论、OCR/ASR 文本中的违法售烟关键词和交易意图"),
     ("m_image_001", "Smoking-detection-YOLO26s 图像识别模型", "image", "Smoking-detection-YOLO26s/best.pt", "/api/image-detector/analyze", 0.50, 30, 1, "使用 Hugging Face basant18/Smoking-detection-YOLO26s 的 best.pt 识别图片中的香烟目标"),
     ("m_image_002", "Enos smoking-detection 图像识别模型", "image", "YOLOv11-Medium/best.pt", "/api/image-detector/analyze", 0.50, 30, 1, "使用 Hugging Face Enos-123/smoking-detection 的 best.pt 识别 cigarette 目标"),
-    ("m_audio_001", "语音交易话术识别模型", "audio", "audio-risk-v1.0", "/api/mock/audio/analyze", 0.70, 60, 1, "短视频口播转写和交易话术识别"),
+    ("m_audio_001", "语音交易话术识别模型", "audio", "audio-risk-v0.1.0", "/api/audio-service/infer-video-audio", 0.70, 60, 1, "调用语音服务完成音视频 ASR 转写、关键词识别和交易话术评分"),
     ("m_fusion_001", "多模态融合评分模型", "fusion", "fusion-risk-v1.0", "/api/mock/fusion/analyze", 0.80, 30, 1, "综合文本、图像、语音结果输出最终风险评分"),
 ]
 
@@ -366,6 +366,22 @@ def call_vision_image_service(content_id, image_path, conf=0.35, model_id=None):
         conn.close()
 
 
+def call_vision_video_service(content_id, video_path, conf=0.35, model_id=None):
+    parsed = urlparse(VISION_SERVICE_URL)
+    if parsed.scheme not in {"http", "https"}:
+        raise RuntimeError("VISION_SERVICE_URL 仅支持 http/https")
+    fields = {"content_id": content_id, "conf": conf}
+    if model_id:
+        fields["model_id"] = model_id
+    return service_post_file(
+        VISION_SERVICE_URL,
+        "/infer/video",
+        {"data": video_path.read_bytes(), "filename": video_path.name},
+        fields=fields,
+        timeout=180,
+    )
+
+
 def call_vision_image_service_bytes(content_id, image_bytes, filename, conf=0.35, model_id=None):
     suffix = Path(filename or "upload.jpg").suffix.lower()
     if suffix not in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}:
@@ -476,6 +492,43 @@ def service_post_file(base_url, path, file_payload, fields=None, timeout=120):
         content_type=f"multipart/form-data; boundary={boundary}",
         timeout=timeout,
     )
+
+
+def text_service_analyze_content(content):
+    payload = {
+        "content_id": content["id"],
+        "platform": content["platform"],
+        "title": content["title"] or "",
+        "description": content["raw_text"] or "",
+        "account_name": content["account_name"] or "",
+        "account_bio": "",
+        "comments": [content["raw_text"]] if content["content_type"] == "评论" and content["raw_text"] else [],
+        "ocr_texts": [],
+        "asr_texts": [],
+        "content_url": content["content_url"] or "",
+    }
+    result = service_post_json(TEXT_SERVICE_URL, "/infer/content", payload)
+    result = merge_business_text_rules({"text": " ".join([payload["title"], payload["description"], payload["account_name"]])}, result)
+    result["text_risk_score"] = float(result.get("text_score") or 0)
+    result["model_version"] = result.get("model_version", "text-risk-v0.1.0")
+    result["service_mode"] = "text-service"
+    return result
+
+
+def audio_service_analyze_media(content, media_path):
+    media_type = "video" if content["content_type"] == "视频" or media_path.suffix.lower() in {".mp4", ".mov", ".avi", ".mkv"} else "audio"
+    endpoint = "/infer/video-audio" if media_type == "video" else "/infer/audio"
+    result = service_post_file(
+        AUDIO_SERVICE_URL,
+        endpoint,
+        {"data": media_path.read_bytes(), "filename": media_path.name},
+        fields={"content_id": content["id"], "save_evidence": "true"},
+        timeout=240,
+    )
+    result["audio_risk_score"] = float(result.get("audio_score") or 0)
+    result["model_version"] = result.get("model_version", "audio-risk-v0.1.0")
+    result["service_mode"] = "audio-service"
+    return result
 
 
 def text_service_status():
@@ -592,7 +645,10 @@ def analyze_image_with_vision(payload):
     content_id = payload.get("content_id") or new_id("IMG")
     evidence_frame = str(media_path)
     try:
-        visual_result = call_vision_image_service(content_id, media_path, conf=float(payload.get("conf") or 0.35), model_id=payload.get("model_id"))
+        if media_path.suffix.lower() in {".mp4", ".mov", ".avi", ".mkv"} or payload.get("media_type") == "video":
+            visual_result = call_vision_video_service(content_id, media_path, conf=float(payload.get("conf") or 0.35), model_id=payload.get("model_id"))
+        else:
+            visual_result = call_vision_image_service(content_id, media_path, conf=float(payload.get("conf") or 0.35), model_id=payload.get("model_id"))
         return visual_result_to_image_result(visual_result, evidence_frame)
     except Exception as exc:
         try:
@@ -790,29 +846,41 @@ def fusion_config():
 
 def analyze_fusion(payload):
     cfg = fusion_config()
+    text_score = float(payload.get("text_risk_score") or 0)
+    image_score = float(payload.get("image_risk_score") or 0)
+    audio_score = float(payload.get("audio_risk_score") or 0)
     score = (
-        float(payload.get("text_risk_score") or 0) * cfg["text_weight"]
-        + float(payload.get("image_risk_score") or 0) * cfg["image_weight"]
-        + float(payload.get("audio_risk_score") or 0) * cfg["audio_weight"]
+        text_score * cfg["text_weight"]
+        + image_score * cfg["image_weight"]
+        + audio_score * cfg["audio_weight"]
         + float(payload.get("account_risk_score") or 0) * cfg["account_weight"]
     )
-    if score >= cfg["high_risk_threshold"]:
+    strongest_modality = max(text_score, image_score, audio_score)
+    effective_score = max(score, strongest_modality if strongest_modality >= 0.50 else score)
+    if effective_score >= cfg["high_risk_threshold"]:
         level = "高风险"
-    elif score >= cfg["medium_risk_threshold"]:
+    elif effective_score >= cfg["medium_risk_threshold"]:
         level = "中风险"
-    elif score >= cfg["low_risk_threshold"]:
+    elif effective_score >= cfg["low_risk_threshold"]:
+        level = "低风险"
+    elif strongest_modality >= 0.85:
+        level = "高风险"
+    elif strongest_modality >= 0.70:
+        level = "中风险"
+    elif strongest_modality >= 0.50:
         level = "低风险"
     else:
         level = "无风险"
     violation = []
-    if float(payload.get("image_risk_score") or 0) >= 0.65:
+    if image_score >= 0.65:
         violation.append("图像疑似售烟")
-    if float(payload.get("text_risk_score") or 0) >= 0.65:
+    if text_score >= 0.65:
         violation.append("文本交易引流")
-    if float(payload.get("audio_risk_score") or 0) >= 0.65:
+    if audio_score >= 0.65:
         violation.append("语音交易暗示")
     return {
-        "risk_score": round(score, 2),
+        "risk_score": round(effective_score, 2),
+        "weighted_score": round(score, 2),
         "risk_level": level,
         "violation_type": violation or ["未发现明显违规"],
         "hit_modalities": [name for name, value in [("文本", payload.get("text_risk_score", 0)), ("图像", payload.get("image_risk_score", 0)), ("语音", payload.get("audio_risk_score", 0))] if float(value or 0) >= 0.65],
@@ -828,16 +896,27 @@ def recognize_content(content_id):
         if not content:
             return None
         conn.execute("DELETE FROM recognition_results WHERE content_id=?", (content_id,))
-        text_result = analyze_text({"content_id": content_id, "text": f"{content['title']} {content['raw_text']}"})
+        try:
+            text_result = text_service_analyze_content(content)
+        except Exception as exc:
+            text_result = analyze_text({"content_id": content_id, "text": f"{content['title']} {content['raw_text']}"})
+            text_result["service_mode"] = "local-text-fallback"
+            text_result["text_service_error"] = str(exc)
         image_score = 0
         audio_score = 0
         image_result = None
         audio_result = None
+        media_path = resolve_media_path(content["media_url"])
         if content["media_url"] or content["content_type"] in {"图片", "视频"}:
-            image_result = analyze_image_with_vision({"content_id": content_id, "image_url": content["media_url"]})
+            image_result = analyze_image_with_vision({"content_id": content_id, "image_url": content["media_url"], "media_type": "video" if content["content_type"] == "视频" else "image"})
             image_score = image_result["image_risk_score"]
-        if content["content_type"] == "视频":
-            audio_result = analyze_audio({"content_id": content_id, "audio_url": content["media_url"]})
+        if content["content_type"] in {"视频", "音频"} and media_path:
+            try:
+                audio_result = audio_service_analyze_media(content, media_path)
+            except Exception as exc:
+                audio_result = analyze_audio({"content_id": content_id, "audio_url": content["media_url"]})
+                audio_result["service_mode"] = "local-audio-fallback"
+                audio_result["audio_service_error"] = str(exc)
             audio_score = audio_result["audio_risk_score"]
         account_score = 0.70 if any(w in content["account_name"] for w in ["同城", "优选", "生活馆"]) else 0.25
         fusion = analyze_fusion({

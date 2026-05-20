@@ -119,7 +119,7 @@ async function renderContents() {
     <div class="toolbar">
       <div><label><span>关键词</span><input id="kw" placeholder="标题/账号/正文" /></label></div>
       <div><label><span>平台</span><select id="platform"><option value="">全部</option><option>抖音</option><option>快手</option><option>小红书</option><option>微博</option></select></label></div>
-      <div><label><span>内容类型</span><select id="ctype"><option value="">全部</option><option>视频</option><option>图片</option><option>文本</option><option>评论</option><option>账号</option></select></label></div>
+      <div><label><span>内容类型</span><select id="ctype"><option value="">全部</option><option>视频</option><option>音频</option><option>图片</option><option>文本</option><option>评论</option><option>账号</option></select></label></div>
       <div><label><span>风险等级</span><select id="risk"><option value="">全部</option><option>高风险</option><option>中风险</option><option>低风险</option><option>无风险</option></select></label></div>
       <div class="actions"><button onclick="filterContents()">查询</button><button class="secondary" onclick="openContentForm()">新增内容</button></div>
     </div>
@@ -406,7 +406,7 @@ function openContentForm() {
     <h3>新增识别内容</h3>
     <div class="form-grid">
       <label><span>平台</span><select id="f_platform"><option>抖音</option><option>快手</option><option>小红书</option><option>微博</option></select></label>
-      <label><span>内容类型</span><select id="f_type"><option>视频</option><option>图片</option><option>文本</option><option>评论</option><option>账号</option></select></label>
+      <label><span>内容类型</span><select id="f_type"><option>视频</option><option>音频</option><option>图片</option><option>文本</option><option>评论</option><option>账号</option></select></label>
       <label class="full"><span>标题</span><input id="f_title" value="本地新货，私聊了解" /></label>
       <label><span>账号名称</span><input id="f_account" value="演示账号" /></label>
       <label><span>原始链接</span><input id="f_url" value="https://example.com/demo" /></label>
