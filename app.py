@@ -907,10 +907,13 @@ def recognize_content(content_id):
         image_result = None
         audio_result = None
         media_path = resolve_media_path(content["media_url"])
-        if content["media_url"] or content["content_type"] in {"图片", "视频"}:
+        media_ext = media_path.suffix.lower() if media_path else ""
+        is_visual_media = content["content_type"] in {"图片", "视频"} or media_ext in {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".mp4", ".mov", ".avi", ".mkv"}
+        is_audio_media = content["content_type"] in {"音频", "视频"} or media_ext in {".wav", ".mp3", ".m4a", ".aac", ".flac", ".mp4", ".mov", ".avi", ".mkv"}
+        if is_visual_media:
             image_result = analyze_image_with_vision({"content_id": content_id, "image_url": content["media_url"], "media_type": "video" if content["content_type"] == "视频" else "image"})
             image_score = image_result["image_risk_score"]
-        if content["content_type"] in {"视频", "音频"} and media_path:
+        if is_audio_media and media_path:
             try:
                 audio_result = audio_service_analyze_media(content, media_path)
             except Exception as exc:
