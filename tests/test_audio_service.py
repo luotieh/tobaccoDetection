@@ -4,6 +4,7 @@ import pytest
 from audio_service.main import app
 from audio_service.schemas import ASRSegment
 from audio_service.services.keyword_matcher import AudioKeywordMatcher
+from audio_service.services.explanation import explain
 from audio_service.services.scoring import score_audio
 from audio_service.utils.time_utils import format_timestamp
 
@@ -33,3 +34,7 @@ def test_audio_scoring_high():
     score, level = score_audio(hits, brands)
     assert score >= 0.85
     assert level == "high"
+
+
+def test_audio_explanation_for_transcript_without_hits():
+    assert "已成功转写" in explain([], [], "今天天气不错")

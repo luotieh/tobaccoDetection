@@ -72,7 +72,7 @@ class AudioRiskPipeline:
             brand_entities=brands,
             contact_entities=contacts,
             evidence_segments=evidence,
-            explanation=explain(hits, brands),
+            explanation=explain(hits, brands, asr_result.transcript),
         )
         self.save_result(result)
         return result
