@@ -438,6 +438,62 @@ def audio_service_status():
     }
 
 
+def merge_business_text_rules(payload, result):
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return result
+    rules = enabled_rules()
+    matched = [r for r in rules if r["word"] and r["word"] in text]
+    if not matched:
+        return result
+
+    existing_words = {item.get("word") for item in result.get("hit_keywords", []) if isinstance(item, dict)}
+    additions = []
+    risk_types = set(result.get("risk_types") or [])
+    for rule in matched:
+        word = rule["word"]
+        if word not in existing_words:
+            start = text.find(word)
+            category = {
+                "keyword": "trade",
+                "blackword": "slang",
+                "brand": "brand",
+                "whitelist": "whitelist",
+                "region": "delivery",
+            }.get(rule["rule_type"], rule["rule_type"])
+            additions.append({
+                "word": word,
+                "normalized_word": word,
+                "category": category,
+                "dictionary": "management_rule_words",
+                "start": start,
+                "end": start + len(word) if start >= 0 else None,
+            })
+        if rule["rule_type"] == "keyword":
+            risk_types.update({"sale_intent", "trade_lead"})
+        elif rule["rule_type"] == "blackword":
+            risk_types.add("slang_mention")
+        elif rule["rule_type"] == "brand":
+            risk_types.add("brand_mention")
+        elif rule["rule_type"] == "whitelist":
+            risk_types.add("whitelist_context")
+        elif rule["rule_type"] == "region":
+            risk_types.add("regional_delivery_context")
+
+    if additions:
+        result["hit_keywords"] = (result.get("hit_keywords") or []) + additions
+    if risk_types:
+        result["risk_types"] = sorted(risk_types - {"normal_discussion"}) or sorted(risk_types)
+    positive_rules = [r for r in matched if r["rule_type"] != "whitelist"]
+    if positive_rules and result.get("risk_level") == "none":
+        result["risk_level"] = "low"
+        result["text_score"] = max(float(result.get("text_score") or 0), 0.5)
+    if positive_rules and result.get("explanation") == "未发现明显烟草交易风险表达。":
+        words = "、".join(r["word"] for r in positive_rules[:8])
+        result["explanation"] = f"文本命中管理端规则词库：{words}，需要结合上下文复核。"
+    return result
+
+
 def visual_result_to_image_result(visual_result, evidence_frame):
     detections = visual_result.get("detected_objects") or []
     ocr_items = visual_result.get("ocr_text") or []
@@ -861,7 +917,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(service_post_file(AUDIO_SERVICE_URL, service_path, payload["file"], fields))
             payload = self.body_json()
             if path == "/api/text-service/infer-text":
-                return self.send_json(service_post_json(TEXT_SERVICE_URL, "/infer/text", payload))
+                return self.send_json(merge_business_text_rules(payload, service_post_json(TEXT_SERVICE_URL, "/infer/text", payload)))
             if path == "/api/text-service/infer-content":
                 return self.send_json(service_post_json(TEXT_SERVICE_URL, "/infer/content", payload))
             if path == "/api/contents":

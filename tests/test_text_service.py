@@ -24,6 +24,12 @@ def test_dictionary_matcher_hits_trade():
     assert {hit.category for hit in hits} >= {"trade"}
 
 
+def test_dictionary_matcher_covers_management_rule_words():
+    hits = DictionaryMatcher().match("绿花 黑金刚 老客户 面交 本地")
+    words = {hit.normalized_word for hit in hits}
+    assert {"绿花", "黑金刚", "老客户", "面交", "本地"} <= words
+
+
 def test_entity_extractor_masks_phone():
     entities = EntityExtractor().extract_contacts("电话 13812345678")
     assert entities[0].masked == "138****5678"
@@ -36,3 +42,12 @@ async def test_text_infer_high_risk():
     data = res.json()
     assert data["risk_level"] in {"medium", "high"}
     assert "trade_lead" in data["risk_types"]
+
+
+@pytest.mark.anyio
+async def test_text_infer_rule_word_has_keyword_explanation():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.post("/infer/text", json={"content_id": "t_rule", "source": "comment", "text": "黑金刚"})
+    data = res.json()
+    assert data["hit_keywords"]
+    assert data["explanation"] != "未发现明显烟草交易风险表达。"

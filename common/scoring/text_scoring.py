@@ -41,5 +41,6 @@ def score_text(
     risk_types = sorted({item.label for item in semantics if item.score >= 0.6 and item.label != "normal_discussion"})
     if any(hit.dictionary == "whitelist_keywords" for hit in hits):
         risk_types.append("whitelist_context")
+    if any(hit.category == "delivery" for hit in hits):
+        risk_types.append("regional_delivery_context")
     return score, risk_level(score, *thresholds), sorted(set(risk_types)) or ["normal_discussion"]
-
