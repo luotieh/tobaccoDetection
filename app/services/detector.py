@@ -17,6 +17,8 @@ class TobaccoDetector:
     def __init__(self, weights: Path | None = None, model_id: str | None = None):
         self.class_mapping = json.loads((ROOT_DIR / "app" / "data" / "class_mapping.json").read_text(encoding="utf-8"))
         self.model_id = model_id or settings.yolo_model_id
+        if self.model_id not in MODEL_REGISTRY and weights is None:
+            self.model_id = settings.yolo_model_id if settings.yolo_model_id in MODEL_REGISTRY else "basant-yolo26s"
         self.weights = settings.resolve(weights or MODEL_REGISTRY.get(self.model_id, settings.yolo_weights))
         self.model = None
         self.mock = settings.use_mock_model or not self.weights.exists()
@@ -37,6 +39,17 @@ class TobaccoDetector:
             "weights": str(self.weights),
             "mock": self.mock,
             "model_id": self.model_id,
+            "model_exists": self.weights.exists(),
+            "model_size_mb": round(self.weights.stat().st_size / 1024 / 1024, 2) if self.weights.exists() else 0,
+            "available_models": [
+                {
+                    "id": mid,
+                    "weights": str(path),
+                    "model_exists": path.exists(),
+                    "model_size_mb": round(path.stat().st_size / 1024 / 1024, 2) if path.exists() else 0,
+                }
+                for mid, path in MODEL_REGISTRY.items()
+            ],
             "classes": list(self.class_mapping.keys()),
         }
 

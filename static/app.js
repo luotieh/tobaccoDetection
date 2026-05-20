@@ -133,10 +133,13 @@ async function renderImageTest() {
     <div class="panel">
       <h3 class="section-title">模型状态 <span class="tag ${status.ready ? "green" : "red"}">${status.ready ? "已就绪" : "不可用"}</span></h3>
       <div class="kv">
-        <b>权重路径</b><span>${status.model_path}</span>
+        <b>服务模式</b><span>${status.service_mode || "-"}</span>
+        <b>服务地址</b><span>${status.service_url || "-"}</span>
+        <b>服务权重</b><span>${status.model_path || "-"}</span>
         <b>权重大小</b><span>${status.model_exists ? status.model_size_mb + " MB" : "未找到"}</span>
         <b>当前模型</b><span>${status.name}｜${status.version}</span>
         <b>依赖状态</b><span>${Object.entries(status.dependencies).map(([k, v]) => `${k}: ${v}`).join("；")}</span>
+        ${status.vision_service_error ? `<b>服务错误</b><span>${status.vision_service_error}</span>` : ""}
       </div>
     </div>
     <div class="panel">
@@ -204,6 +207,8 @@ async function runImageDetector() {
       `目标类别：${(result.detected_objects || []).join("、") || "-"}`,
       `模型名称：${result.model_name}`,
       `模型版本：${result.model_version}`,
+      `服务模式：${result.service_mode || "-"}`,
+      `${result.vision_service_error ? "视觉服务错误：" + result.vision_service_error : ""}`,
     ].join("\n");
     $("#detectorTable").innerHTML = detectionsTable(result.detections || []);
     toast("图像识别完成");

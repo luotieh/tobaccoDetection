@@ -15,18 +15,26 @@ from app.services.video import sample_video
 
 class VisionPipeline:
     def __init__(self):
-        self.detector = TobaccoDetector()
+        self.detectors: dict[str, TobaccoDetector] = {}
+        self.detector = self.get_detector()
         self.ocr = OCRService()
         self.brand_matcher = BrandMatcher()
 
-    def model_info(self) -> dict:
+    def get_detector(self, model_id: str | None = None) -> TobaccoDetector:
+        key = model_id or "default"
+        if key not in self.detectors:
+            self.detectors[key] = TobaccoDetector(model_id=model_id)
+        return self.detectors[key]
+
+    def model_info(self, model_id: str | None = None) -> dict:
+        detector = self.get_detector(model_id)
         return {
-            "detector": self.detector.info(),
+            "detector": detector.info(),
             "ocr": {"enabled": self.ocr.enabled, "engine": self.ocr.engine_name, "mock": self.ocr.mock},
         }
 
-    def infer_image(self, image, content_id: str, conf: float | None = None, save_evidence: bool = True) -> VisualResult:
-        detections = self.detector.predict_image(image, conf=conf)
+    def infer_image(self, image, content_id: str, conf: float | None = None, save_evidence: bool = True, model_id: str | None = None) -> VisualResult:
+        detections = self.get_detector(model_id).predict_image(image, conf=conf)
         ocr_texts = self.ocr.recognize(image)
         brand_results = self.brand_matcher.match(ocr_texts)
         scene_tags = infer_scene_tags(detections, ocr_texts)
@@ -55,13 +63,14 @@ class VisionPipeline:
         sample_fps: float | None = None,
         max_seconds: int | None = None,
         conf: float | None = None,
+        model_id: str | None = None,
     ) -> VideoVisualResult:
         frames, duration = sample_video(video_path, sample_fps=sample_fps, max_seconds=max_seconds)
         all_detections = []
         all_ocr = []
         evidence_frames = []
         for index, frame in enumerate(frames):
-            detections = self.detector.predict_image(frame.image, conf=conf, timestamp=frame.timestamp)
+            detections = self.get_detector(model_id).predict_image(frame.image, conf=conf, timestamp=frame.timestamp)
             all_detections.extend(detections)
             frame_ocr = self.ocr.recognize(frame.image) if detections else []
             all_ocr.extend(frame_ocr)

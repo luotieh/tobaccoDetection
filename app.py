@@ -318,7 +318,12 @@ def resolve_media_path(media_url):
     return None
 
 
-def call_vision_image_service(content_id, image_path, conf=0.35):
+def vision_service_path(path):
+    parsed = urlparse(VISION_SERVICE_URL)
+    return f"{parsed.path.rstrip('/')}{path}" if parsed.path else path
+
+
+def call_vision_image_service(content_id, image_path, conf=0.35, model_id=None):
     parsed = urlparse(VISION_SERVICE_URL)
     if parsed.scheme not in {"http", "https"}:
         raise RuntimeError("VISION_SERVICE_URL 仅支持 http/https")
@@ -330,6 +335,8 @@ def call_vision_image_service(content_id, image_path, conf=0.35):
         ("save_evidence", b"true", None),
         ("file", data, image_path.name),
     ]
+    if model_id:
+        fields.insert(2, ("model_id", str(model_id).encode("utf-8"), None))
     body = bytearray()
     for name, value, filename in fields:
         body.extend(f"--{boundary}\r\n".encode("utf-8"))
@@ -346,7 +353,7 @@ def call_vision_image_service(content_id, image_path, conf=0.35):
     try:
         conn.request(
             "POST",
-            f"{parsed.path.rstrip('/')}/infer/image" if parsed.path else "/infer/image",
+            vision_service_path("/infer/image"),
             body=bytes(body),
             headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "Content-Length": str(len(body))},
         )
@@ -357,6 +364,55 @@ def call_vision_image_service(content_id, image_path, conf=0.35):
         return json.loads(raw)
     finally:
         conn.close()
+
+
+def call_vision_image_service_bytes(content_id, image_bytes, filename, conf=0.35, model_id=None):
+    suffix = Path(filename or "upload.jpg").suffix.lower()
+    if suffix not in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}:
+        suffix = ".jpg"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
+        tmp.write(image_bytes)
+        tmp.flush()
+        return call_vision_image_service(content_id, Path(tmp.name), conf=conf, model_id=model_id)
+
+
+def vision_service_status(selected_model_id=None):
+    parsed = urlparse(VISION_SERVICE_URL)
+    if parsed.scheme not in {"http", "https"}:
+        raise RuntimeError("VISION_SERVICE_URL 仅支持 http/https")
+    suffix = f"?model_id={selected_model_id}" if selected_model_id else ""
+    data = service_get(VISION_SERVICE_URL, f"/models/info{suffix}", timeout=10)
+    detector = data.get("detector", {})
+    current_id = detector.get("model_id") or selected_model_id or "default"
+    raw_models = detector.get("available_models") or [{"id": current_id, "weights": detector.get("weights", ""), "model_exists": detector.get("model_exists", False), "model_size_mb": detector.get("model_size_mb", 0)}]
+    models = [
+        {
+            "id": item.get("id"),
+            "name": item.get("id"),
+            "version": Path(item.get("weights", "")).name or item.get("id"),
+            "description": "视觉服务 YOLO 模型",
+            "model_path": item.get("weights", ""),
+            "model_exists": item.get("model_exists", False),
+            "model_size_mb": item.get("model_size_mb", 0),
+        }
+        for item in raw_models
+    ]
+    current = next((item for item in models if item["id"] == current_id), models[0] if models else {})
+    return {
+        **current,
+        "service_url": VISION_SERVICE_URL,
+        "service_mode": "vision-service",
+        "current_model_id": current_id,
+        "models": models,
+        "dependencies": {
+            "vision_service": "ok",
+            "detector_type": detector.get("type", "-"),
+            "ocr": data.get("ocr", {}).get("engine", "-"),
+            "ocr_mock": data.get("ocr", {}).get("mock", "-"),
+        },
+        "ready": not bool(detector.get("mock", True)),
+        "mock": detector.get("mock", True),
+    }
 
 
 def service_request(base_url, method, path, body=None, content_type=None, timeout=60):
@@ -536,7 +592,7 @@ def analyze_image_with_vision(payload):
     content_id = payload.get("content_id") or new_id("IMG")
     evidence_frame = str(media_path)
     try:
-        visual_result = call_vision_image_service(content_id, media_path, conf=float(payload.get("conf") or 0.35))
+        visual_result = call_vision_image_service(content_id, media_path, conf=float(payload.get("conf") or 0.35), model_id=payload.get("model_id"))
         return visual_result_to_image_result(visual_result, evidence_frame)
     except Exception as exc:
         try:
@@ -574,6 +630,10 @@ def normalize_detector_model_id(model_id=None):
 
 
 def image_detector_status(selected_model_id=None):
+    try:
+        return vision_service_status(selected_model_id)
+    except Exception as exc:
+        fallback_reason = str(exc)
     deps = {}
     for module in ["ultralytics", "cv2", "torch"]:
         try:
@@ -586,11 +646,51 @@ def image_detector_status(selected_model_id=None):
     current = next(item for item in models if item["id"] == model_id)
     return {
         **current,
+        "service_url": VISION_SERVICE_URL,
+        "service_mode": "local-yolo-fallback",
+        "vision_service_error": fallback_reason,
         "current_model_id": model_id,
         "models": models,
         "dependencies": deps,
         "ready": current["model_exists"] and all(not str(v).startswith("missing:") for v in deps.values()),
     }
+
+
+def visual_result_to_detector_result(visual_result, model_id=None):
+    detections = []
+    for item in visual_result.get("detected_objects") or []:
+        bbox = item.get("bbox") or [0, 0, 0, 0]
+        detections.append({
+            "class_id": item.get("class_id", 0),
+            "class_name": item.get("class_name") or item.get("label_zh") or "unknown",
+            "confidence": float(item.get("confidence") or 0),
+            "box": {
+                "x1": bbox[0] if len(bbox) > 0 else 0,
+                "y1": bbox[1] if len(bbox) > 1 else 0,
+                "x2": bbox[2] if len(bbox) > 2 else 0,
+                "y2": bbox[3] if len(bbox) > 3 else 0,
+            },
+        })
+    evidence = visual_result.get("evidence_frames") or []
+    return {
+        "detected": bool(detections),
+        "confidence": max([item["confidence"] for item in detections], default=0),
+        "image_risk_score": float(visual_result.get("visual_score") or 0),
+        "detected_objects": [item["class_name"] for item in detections],
+        "detections": detections,
+        "annotated_image": evidence[0].get("image_path") if evidence and isinstance(evidence[0], dict) else "",
+        "model_id": model_id or "vision-service",
+        "model_name": "tobacco-vision-risk-service",
+        "model_version": visual_result.get("model_version", "vision-tobacco-v0.1.0"),
+        "service_mode": "vision-service",
+        "visual_service_result": visual_result,
+    }
+
+
+def vision_detect_image(image_bytes, filename="", conf=0.5, model_id=None, imgsz=None):
+    content_id = f"detector_{uuid.uuid4().hex[:12]}"
+    visual_result = call_vision_image_service_bytes(content_id, image_bytes, filename, conf=conf, model_id=model_id)
+    return visual_result_to_detector_result(visual_result, model_id=model_id)
 
 
 def load_yolo_model(model_id=None):
@@ -907,7 +1007,13 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/image-detector/analyze":
                 payload = self.body_multipart_image()
-                return self.send_json(yolo_detect_image(**payload))
+                try:
+                    return self.send_json(vision_detect_image(**payload))
+                except Exception as exc:
+                    result = yolo_detect_image(**payload)
+                    result["service_mode"] = "local-yolo-fallback"
+                    result["vision_service_error"] = str(exc)
+                    return self.send_json(result)
             if path in {"/api/audio-service/infer-audio", "/api/audio-service/infer-video-audio"}:
                 payload = self.body_multipart_file()
                 service_path = "/infer/audio" if path.endswith("infer-audio") else "/infer/video-audio"
