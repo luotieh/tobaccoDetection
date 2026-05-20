@@ -20,3 +20,5 @@ audio_storage/results/*
 !audio_storage/evidence/.gitkeep
 !audio_storage/results/.gitkeep
 .pytest_cache/
+.runtime/
+.env

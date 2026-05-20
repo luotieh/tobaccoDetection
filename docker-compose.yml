@@ -1,15 +1,63 @@
 services:
+  management:
+    build:
+      context: .
+      dockerfile: Dockerfile.management
+    ports:
+      - "8000:8000"
+    env_file: &default-env
+      - path: .env.example
+      - path: .env
+        required: false
+    environment:
+      VISION_SERVICE_URL: http://vision-risk-service:9000
+      TEXT_SERVICE_URL: http://text-risk-service:8010
+      AUDIO_SERVICE_URL: http://audio-risk-service:8020
+    volumes:
+      - ./data:/app/data
+      - ./storage:/app/storage
+      - ./models:/app/models
+    depends_on:
+      - vision-risk-service
+      - text-risk-service
+      - audio-risk-service
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/dashboard', timeout=2).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  vision-risk-service:
+    build:
+      context: .
+      dockerfile: app/Dockerfile
+    ports:
+      - "9000:9000"
+    env_file: *default-env
+    volumes:
+      - ./storage:/app/storage
+      - ./models:/app/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9000/health', timeout=2).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
   text-risk-service:
     build:
       context: .
       dockerfile: text_service/Dockerfile
     ports:
       - "8010:8010"
-    env_file:
-      - .env
+    env_file: *default-env
     volumes:
       - ./storage:/app/storage
       - ./models:/app/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8010/health', timeout=2).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
 
   audio-risk-service:
     build:
@@ -17,9 +65,12 @@ services:
       dockerfile: audio_service/Dockerfile
     ports:
       - "8020:8020"
-    env_file:
-      - .env
+    env_file: *default-env
     volumes:
       - ./storage:/app/storage
       - ./models:/app/models
-
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8020/health', timeout=2).read()"]
+      interval: 30s
+      timeout: 5s
+      retries: 3

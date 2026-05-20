@@ -26,6 +26,33 @@
 
 ## 启动
 
+推荐先复制环境变量模板：
+
+```bash
+cp .env.example .env
+```
+
+本地一键启动四个服务：
+
+```bash
+scripts/start_all.sh dev
+```
+
+可用 profile：
+
+```text
+dev  - 开发联调模式，允许 Mock，语音 Mock 默认不制造命中转写。
+demo - 演示模式，显式启用视觉 Mock 和语音演示转写，适合前端闭环展示。
+real - 真实推理模式，关闭模型 fallback，需要本地 YOLO 权重和 Whisper/ASR 可用。
+```
+
+查看状态和停止服务：
+
+```bash
+scripts/status_all.sh
+scripts/stop_all.sh
+```
+
 管理后台 Demo：
 
 ```bash
@@ -77,6 +104,18 @@ VISION_SERVICE_URL=http://127.0.0.1:9000 \
 TEXT_SERVICE_URL=http://127.0.0.1:8010 \
 AUDIO_SERVICE_URL=http://127.0.0.1:8020 \
 python3 app.py 8000
+```
+
+Docker Compose 启动完整服务：
+
+```bash
+docker compose up --build
+```
+
+Compose 默认读取 `.env.example`，如果存在本地 `.env` 会自动覆盖同名变量。它会启动管理端、视觉服务、文本服务和语音服务。管理端地址为：
+
+```text
+http://127.0.0.1:8000
 ```
 
 首次启动会自动创建 SQLite 数据库：
