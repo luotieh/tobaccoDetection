@@ -449,7 +449,7 @@ async function renderDetail(id) {
     </div>
     <div class="detail-layout">
       <aside class="phone-column">
-        ${phonePostPreview(c, byType)}
+        ${phonePostPreview(c, byType, detail.comments || [])}
       </aside>
       <div class="detail-main">
         <div class="grid-2">
@@ -479,45 +479,98 @@ function escapeHtml(value) {
   })[ch]);
 }
 
-function phonePostPreview(c, byType) {
-  const platformClass = platformTone(c.platform);
+function phonePostPreview(c, byType, comments = []) {
   const transcript = byType.audio?.transcript || "";
   const ocrText = (byType.image?.ocr_text || []).join(" ");
+  const author = c.author || {};
+  const authorName = c.account_name || author.nickname || author.id || "未知账号";
+  const authorDesc = author.description || "";
+  const mediaItems = phoneMediaItems(c, byType);
+  const nestedComments = nestPhoneComments(comments);
+  const totalComments = comments.length;
+  const replyCount = comments.filter(item => item.comment_type === "sub_comment").length;
   return `
     <div class="phone-shell">
       <div class="phone-island"></div>
-      <div class="phone-screen ${platformClass}">
-        <div class="phone-wallpaper"></div>
+      <div class="phone-screen crawler-phone-screen">
         <div class="phone-status"><span>09:41</span><span>5G 100%</span></div>
-        <div class="phone-appbar glass">
-          <div>
-            <b>${escapeHtml(c.platform)}</b>
-            <span>${escapeHtml(c.content_type)}内容</span>
-          </div>
-          <span class="phone-dot"></span>
+        <div class="crawler-phone-header">
+          <button class="crawler-back" type="button" aria-label="返回">‹</button>
+          <strong>${escapeHtml(c.title || "内容详情")}</strong>
+          <span></span>
         </div>
-        <article class="phone-post glass">
-        <header class="phone-author">
-          <div class="avatar">${escapeHtml((c.account_name || "?").slice(0, 1))}</div>
-          <div>
-            <strong>${escapeHtml(c.account_name || "未知账号")}</strong>
-            <span>${escapeHtml(c.publish_time || c.collect_time || "-")}</span>
+        <article class="crawler-detail-card">
+          <div class="crawler-chip-row">
+            ${phoneCrawlerBadge(c.platform, "platform")}
+            ${phoneCrawlerBadge(c.crawler_type || c.content_type, "type", crawlerTypeLabel(c))}
+            ${riskTag(c.risk_level)}
           </div>
-        </header>
-        <h3>${escapeHtml(c.title || "未命名内容")}</h3>
-        ${phoneMedia(c, byType)}
-        <p class="phone-text">${escapeHtml(c.raw_text || "暂无正文内容")}</p>
-        ${transcript ? `<div class="phone-transcript"><b>语音转写</b><span>${escapeHtml(transcript)}</span></div>` : ""}
-        ${ocrText ? `<div class="phone-transcript"><b>画面文字</b><span>${escapeHtml(ocrText)}</span></div>` : ""}
-        <footer class="phone-actions">
-          <span>点赞 ${postMetric(c.id, 37, 860)}</span>
-          <span>评论 ${postMetric(c.title, 5, 96)}</span>
-          <span>分享 ${postMetric(c.account_name, 2, 54)}</span>
-        </footer>
+          <header class="crawler-author">
+            ${phoneAvatar(author.avatarUrl, authorName)}
+            <div>
+              <strong>${escapeHtml(authorName)}</strong>
+              ${authorDesc ? `<span>${escapeHtml(authorDesc)}</span>` : `<span>${escapeHtml(c.publish_time || c.collect_time || "-")}</span>`}
+            </div>
+          </header>
+          ${c.title ? `<section class="crawler-section"><b>标题</b><h3>${escapeHtml(c.title)}</h3></section>` : ""}
+          <section class="crawler-section">
+            <b>${c.content_type === "视频" ? "简介" : "内容"}</b>
+            <p class="crawler-text">${escapeHtml(c.raw_text || "暂无正文内容")}</p>
+          </section>
+          <div class="crawler-meta-grid">
+            <div><b>发布日期</b><span>${escapeHtml(c.publish_time || "-")}</span></div>
+            <div><b>采集时间</b><span>${escapeHtml(c.collect_time || "-")}</span></div>
+          </div>
+          ${c.content_url ? `<a class="crawler-link" href="${escapeHtml(c.content_url)}" target="_blank" rel="noreferrer">查看原文</a>` : ""}
+          ${phoneMedia(c, byType, mediaItems)}
+          ${transcript ? `<div class="crawler-evidence"><b>语音转写</b><span>${escapeHtml(transcript)}</span></div>` : ""}
+          ${ocrText ? `<div class="crawler-evidence"><b>画面文字</b><span>${escapeHtml(ocrText)}</span></div>` : ""}
+          <section class="crawler-comments">
+            <div class="crawler-comments-title">
+              <span>评论</span>
+              <em>${totalComments} 条评论（${nestedComments.length} 条一级，${replyCount} 条回复）</em>
+            </div>
+            ${nestedComments.length ? nestedComments.map(comment => phoneCommentNode(comment)).join("") : `<p class="crawler-empty-text">暂无评论</p>`}
+          </section>
         </article>
       </div>
     </div>
   `;
+}
+
+function crawlerTypeLabel(c) {
+  const typ = String(c.crawler_type || "").toLowerCase();
+  if (typ === "video") return "视频";
+  if (typ === "note") return "图文";
+  return c.content_type || "内容";
+}
+
+function phoneCrawlerBadge(value, kind, label) {
+  const text = label || value || "-";
+  const cls = kind === "platform" ? platformBadgeClass(value) : "crawler-badge-type";
+  return `<span class="crawler-badge ${cls}">${escapeHtml(text)}</span>`;
+}
+
+function platformBadgeClass(platform) {
+  if (platform === "抖音") return "crawler-badge-douyin";
+  if (platform === "快手") return "crawler-badge-kuaishou";
+  if (platform === "小红书") return "crawler-badge-redbook";
+  if (platform === "微博") return "crawler-badge-weibo";
+  return "crawler-badge-default";
+}
+
+function phoneAvatar(url, name) {
+  const fallback = escapeHtml((name || "?").slice(0, 1));
+  if (!url) return `<div class="crawler-avatar">${fallback}</div>`;
+  return `<span class="crawler-avatar crawler-avatar-image"><img src="${escapeHtml(url)}" alt="" onerror="this.parentElement.classList.add('avatar-failed');"><em>${fallback}</em></span>`;
+}
+
+function phoneMediaItems(c, byType = {}) {
+  const parsed = Array.isArray(c.media_list_parsed) ? c.media_list_parsed : [];
+  const media = parsed.length ? parsed : [c.media_preview_url || c.media_url].filter(Boolean);
+  const fallback = evidenceImageUrl(byType);
+  if (!media.length && fallback) return [fallback];
+  return media;
 }
 
 function platformTone(platform) {
@@ -539,33 +592,72 @@ function evidenceImageUrl(byType) {
   return frame ? "/" + String(frame).replace(/^\/+/, "") : "";
 }
 
-function phoneMedia(c, byType = {}) {
-  const mediaUrl = c.media_preview_url || c.media_url || "";
+function phoneMedia(c, byType = {}, mediaItems = null) {
+  const mediaList = mediaItems || phoneMediaItems(c, byType);
   const type = c.content_type || "";
   const fallbackImage = evidenceImageUrl(byType);
-  if (!mediaUrl) {
-    if (fallbackImage) {
-      return `<div class="phone-media image"><img src="${escapeHtml(fallbackImage)}" alt="识别证据图"><span>识别证据图</span></div>`;
-    }
-    return `<div class="phone-media empty">无媒体内容</div>`;
+  if (!mediaList.length) {
+    return `<div class="crawler-section"><b>媒体</b><div class="crawler-media-empty">无媒体内容</div></div>`;
   }
-  const safeUrl = escapeHtml(mediaUrl);
-  if (type === "视频" || /\.(mp4|mov|avi|mkv|webm)$/i.test(mediaUrl)) {
+  if (type === "视频" || mediaList.some(url => /\.(mp4|mov|avi|mkv|webm)$/i.test(url))) {
+    const mediaUrl = mediaList.find(url => /\.(mp4|mov|avi|mkv|webm)$/i.test(url)) || mediaList[0];
+    const safeUrl = escapeHtml(mediaUrl);
     const fallbackAttr = fallbackImage ? ` data-fallback="${escapeHtml(fallbackImage)}"` : "";
-    return `<div class="phone-media video"><video src="${safeUrl}"${fallbackAttr} controls muted playsinline onerror="swapPhoneVideoFallback(this);"></video><span>视频内容</span></div>`;
+    return `<div class="crawler-section"><b>视频</b><div class="crawler-video"><video src="${safeUrl}"${fallbackAttr} controls muted playsinline onerror="swapPhoneVideoFallback(this);"></video></div></div>`;
   }
-  if (type === "音频" || /\.(wav|mp3|m4a|aac|flac|ogg)$/i.test(mediaUrl)) {
-    return `<div class="phone-media audio">
+  if (type === "音频" || mediaList.some(url => /\.(wav|mp3|m4a|aac|flac|ogg)$/i.test(url))) {
+    const mediaUrl = mediaList.find(url => /\.(wav|mp3|m4a|aac|flac|ogg)$/i.test(url)) || mediaList[0];
+    const safeUrl = escapeHtml(mediaUrl);
+    return `<div class="crawler-section"><b>音频</b><div class="phone-media audio">
       <div class="audio-art"><span></span></div>
       <audio src="${safeUrl}" controls preload="metadata"></audio>
       <span>${escapeHtml((c.media_url || mediaUrl).split("/").pop() || "音频内容")}</span>
-    </div>`;
+    </div></div>`;
   }
-  if (type === "图片" || /^https?:\/\//.test(mediaUrl) || /\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(mediaUrl)) {
-    const fallbackAttr = fallbackImage ? ` data-fallback="${escapeHtml(fallbackImage)}"` : "";
-    return `<div class="phone-media image"><img src="${safeUrl}"${fallbackAttr} alt="帖子图片" onerror="swapPhoneImageFallback(this);"><span>图片内容</span></div>`;
+  const images = mediaList.filter(url => /^https?:\/\//.test(url) || /\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(url));
+  if (images.length) {
+    return `<div class="crawler-section"><b>图片</b><div class="crawler-media-grid ${images.length === 1 ? "single" : ""}">
+      ${images.slice(0, 9).map((url, index) => `<img src="${escapeHtml(url)}" alt="图片 ${index + 1}" loading="lazy" onerror="this.classList.add('failed-img');">`).join("")}
+    </div></div>`;
   }
-  return `<div class="phone-media file"><span>${escapeHtml(mediaUrl)}</span></div>`;
+  return `<div class="crawler-section"><b>媒体</b><div class="crawler-media-empty">${mediaList.map(escapeHtml).join("<br>")}</div></div>`;
+}
+
+function nestPhoneComments(comments = []) {
+  const nodes = comments.map(item => ({ ...item, replies: [] }));
+  const byRawId = new Map();
+  const roots = [];
+  nodes.forEach(node => {
+    const rawId = node.raw?.id || node.id;
+    byRawId.set(rawId, node);
+  });
+  nodes.forEach(node => {
+    const parentId = node.parent_comment_id || node.raw?.parentId || "";
+    if (node.comment_type === "sub_comment" && byRawId.has(parentId)) {
+      byRawId.get(parentId).replies.push(node);
+    } else {
+      roots.push(node);
+    }
+  });
+  return roots;
+}
+
+function phoneCommentNode(comment, depth = 0) {
+  const sender = comment.sender || {};
+  const senderName = sender.nickname || sender.id || "匿名用户";
+  return `
+    <div class="crawler-comment ${depth ? "reply" : ""}">
+      ${phoneAvatar(sender.avatarUrl, senderName)}
+      <div class="crawler-comment-body">
+        <div class="crawler-comment-meta">
+          <strong>${escapeHtml(senderName)}</strong>
+          <span>${escapeHtml(comment.date || "-")}</span>
+        </div>
+        <p>${escapeHtml(comment.content || "")}</p>
+        ${comment.replies?.length ? `<div class="crawler-replies">${comment.replies.map(reply => phoneCommentNode(reply, depth + 1)).join("")}</div>` : ""}
+      </div>
+    </div>
+  `;
 }
 
 function swapPhoneImageFallback(img) {
@@ -582,9 +674,7 @@ function swapPhoneImageFallback(img) {
 function swapPhoneVideoFallback(video) {
   const fallback = video.dataset.fallback;
   if (fallback) {
-    video.parentElement.classList.remove("video");
-    video.parentElement.classList.add("image");
-    video.parentElement.innerHTML = `<img src="${fallback}" alt="视频证据帧"><span>视频证据帧</span>`;
+    video.parentElement.innerHTML = `<img src="${fallback}" alt="视频证据帧">`;
     return;
   }
   video.parentElement.classList.add("failed");
