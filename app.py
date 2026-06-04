@@ -255,12 +255,29 @@ MODELS = [
 
 RULES = [
     ("keyword", "私聊", 0.22, "交易引流词"),
+    ("keyword", "下单", 0.24, "下单交易表达"),
+    ("keyword", "购买", 0.24, "购买交易表达"),
+    ("keyword", "怎么买", 0.24, "购买交易表达"),
+    ("keyword", "怎么卖", 0.24, "售卖交易表达"),
+    ("keyword", "怎卖", 0.22, "售卖交易表达"),
+    ("keyword", "买货", 0.24, "购买交易表达"),
+    ("keyword", "怎么联系", 0.22, "联系方式引导"),
+    ("keyword", "多少钱", 0.22, "询价表达"),
     ("keyword", "有货", 0.24, "现货表达"),
     ("keyword", "到货", 0.20, "到货表达"),
     ("keyword", "一条", 0.24, "计量交易词"),
+    ("keyword", "一盒", 0.22, "计量交易词"),
+    ("keyword", "一箱", 0.22, "计量交易词"),
+    ("keyword", "十盒", 0.20, "计量交易词"),
     ("keyword", "面交", 0.20, "线下交易词"),
     ("keyword", "私信", 0.18, "引流词"),
     ("keyword", "刚到一批", 0.26, "到货交易表达"),
+    ("keyword", "烟管", 0.12, "烟草相关商品词"),
+    ("keyword", "空烟管", 0.16, "烟草相关商品词"),
+    ("keyword", "空心管", 0.16, "烟草相关商品词"),
+    ("keyword", "空管", 0.12, "烟草相关商品词"),
+    ("keyword", "厂家直销", 0.18, "批发售卖表达"),
+    ("keyword", "批发", 0.18, "批量售卖表达"),
     ("blackword", "绿花", 0.22, "黑话示例"),
     ("blackword", "黑金刚", 0.24, "黑话示例"),
     ("blackword", "懂的来", 0.20, "暗示交易"),
@@ -355,7 +372,22 @@ def analyze_text(payload):
     hits = [r for r in rules if r["rule_type"] == "keyword" and r["word"] in text]
     black = [r for r in rules if r["rule_type"] == "blackword" and r["word"] in text]
     brands = [r for r in rules if r["rule_type"] == "brand" and r["word"] in text]
+    hit_words = {r["word"] for r in hits + black + brands}
+    product_words = {"烟管", "空烟管", "空心管", "空管"}
+    inquiry_words = {"多少钱", "下单", "购买", "怎么买", "怎么卖", "怎卖", "买货", "怎么联系"}
+    quantity_words = {"一条", "一盒", "一箱", "十盒"}
+    lead_words = {"私聊", "私信", "有货", "到货", "刚到一批", "面交", "厂家直销", "批发"}
     score = 0.10 + sum(r["risk_weight"] for r in hits + black + brands) + sum(r["risk_weight"] for r in whitelist)
+    if hit_words & product_words and hit_words & (inquiry_words | quantity_words):
+        score = max(score, 0.82)
+    elif hit_words & inquiry_words and hit_words & quantity_words:
+        score = max(score, 0.76)
+    elif hit_words & product_words and hit_words & lead_words:
+        score = max(score, 0.72)
+    elif len((hit_words & inquiry_words) | (hit_words & quantity_words) | (hit_words & lead_words)) >= 2:
+        score = max(score, 0.70)
+    if len(hit_words) >= 4:
+        score = max(score, 0.86)
     score = max(0, min(0.96, score))
     return {
         "text_risk_score": round(score, 2),

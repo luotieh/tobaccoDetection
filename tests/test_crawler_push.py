@@ -190,3 +190,18 @@ def test_text_service_payload_includes_crawler_comments_and_author_bio(tmp_path,
     assert captured["body"]["comments"] == ["买家 想要一条 多少钱一条", "普通作者 主页有方式 私聊"]
     assert result["text_risk_score"] >= 0.5
     assert {"一条", "私聊"}.issubset({item["word"] for item in result["hit_keywords"]})
+
+
+def test_local_text_fallback_scores_smoke_tube_sale_comments(tmp_path):
+    management = load_management_app()
+    management.DB_PATH = tmp_path / "demo.db"
+    management.init_db()
+
+    result = management.analyze_text({
+        "content_id": "kuaishou_video_3xk94bf22epktsc",
+        "text": "#空纸管 #空心管空烟管空心纸管 小婷空管 老张铁艺165 6，5的多少钱一条子 孤狼的使命 哪里下单 思念， 5.5烟管多少钱一盒",
+    })
+
+    assert result["text_risk_score"] >= 0.82
+    assert result["intent_type"] == "疑似交易引流"
+    assert {"空心管", "空烟管", "烟管", "多少钱", "下单", "一条", "一盒"} <= set(result["hit_keywords"])
