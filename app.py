@@ -584,22 +584,39 @@ def service_post_file(base_url, path, file_payload, fields=None, timeout=120):
     )
 
 
-def text_service_analyze_content(content):
-    comment_texts = content_comment_texts(content["id"])
-    payload = {
+def build_content_text_payload(content):
+    author = json_loads(content.get("author_json"), {}) or {}
+    return {
         "content_id": content["id"],
         "platform": content["platform"],
         "title": content["title"] or "",
         "description": content["raw_text"] or "",
         "account_name": content["account_name"] or "",
-        "account_bio": (json_loads(content.get("author_json"), {}) or {}).get("description", ""),
-        "comments": comment_texts or ([content["raw_text"]] if content["content_type"] == "评论" and content["raw_text"] else []),
+        "account_bio": author.get("description", ""),
+        "comments": content_comment_texts(content["id"]) or ([content["raw_text"]] if content["content_type"] == "评论" and content["raw_text"] else []),
         "ocr_texts": [],
         "asr_texts": [],
         "content_url": content["content_url"] or "",
     }
+
+
+def text_payload_text(payload):
+    parts = [
+        payload.get("title"),
+        payload.get("description"),
+        payload.get("account_name"),
+        payload.get("account_bio"),
+        *(payload.get("comments") or []),
+        *(payload.get("ocr_texts") or []),
+        *(payload.get("asr_texts") or []),
+    ]
+    return " ".join(str(item).strip() for item in parts if item and str(item).strip())
+
+
+def text_service_analyze_content(content):
+    payload = build_content_text_payload(content)
     result = service_post_json(TEXT_SERVICE_URL, "/infer/content", payload)
-    result = merge_business_text_rules({"text": " ".join([payload["title"], payload["description"], payload["account_name"]])}, result)
+    result = merge_business_text_rules({"text": text_payload_text(payload)}, result)
     result["text_risk_score"] = float(result.get("text_score") or 0)
     result["model_version"] = result.get("model_version", "text-risk-v0.1.0")
     result["service_mode"] = "text-service"
@@ -994,7 +1011,7 @@ def recognize_content(content_id):
         try:
             text_result = text_service_analyze_content(content)
         except Exception as exc:
-            text_result = analyze_text({"content_id": content_id, "text": f"{content['title']} {content['raw_text']}"})
+            text_result = analyze_text({"content_id": content_id, "text": text_payload_text(build_content_text_payload(content))})
             text_result["service_mode"] = "local-text-fallback"
             text_result["text_service_error"] = str(exc)
         image_score = 0
@@ -1340,10 +1357,20 @@ def api_contents(qs):
 def content_comment_texts(content_id):
     with db() as conn:
         rows = conn.execute(
-            "SELECT content FROM crawler_comments WHERE content_id=? AND content<>'' ORDER BY date, id",
+            "SELECT content,sender_json FROM crawler_comments WHERE content_id=? AND content<>'' ORDER BY date, id",
             (content_id,),
         ).fetchall()
-    return [row["content"] for row in rows]
+    texts = []
+    for row in rows:
+        sender = json_loads(row["sender_json"], {}) or {}
+        text = " ".join(
+            str(item).strip()
+            for item in [sender.get("nickname"), sender.get("description"), row["content"]]
+            if item and str(item).strip()
+        )
+        if text:
+            texts.append(text)
+    return texts
 
 
 def first_text(*values):

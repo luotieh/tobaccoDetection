@@ -118,3 +118,75 @@ def test_crawler_push_upserts_existing_content(tmp_path):
     assert detail["content"]["content_type"] == "视频"
     assert detail["content"]["title"] == "新标题"
     assert detail["content"]["raw_text"] == "新内容"
+
+
+def test_text_service_payload_includes_crawler_comments_and_author_bio(tmp_path, monkeypatch):
+    management = load_management_app()
+    management.DB_PATH = tmp_path / "demo.db"
+    management.init_db()
+    payload = {
+        "platform": "小红书",
+        "type": "note",
+        "timeTook": 1.2,
+        "data": [
+            {
+                "date": "2026-06-04 10:00:00",
+                "url": "https://example.com/note/text",
+                "title": "普通标题",
+                "id": "text",
+                "videoUrl": None,
+                "imageList": [],
+                "author": {
+                    "id": "seller",
+                    "nickname": "普通作者",
+                    "description": "主页有方式",
+                    "avatarUrl": "",
+                },
+                "content": "普通正文",
+                "comments": [
+                    {
+                        "date": "2026-06-04 10:01:00",
+                        "id": "c1",
+                        "sender": {"id": "buyer", "nickname": "买家", "description": "想要一条", "avatarUrl": ""},
+                        "content": "多少钱一条",
+                        "subComments": [
+                            {
+                                "date": "2026-06-04 10:02:00",
+                                "id": "c2",
+                                "sender": {"id": "seller", "nickname": "普通作者", "description": "主页有方式", "avatarUrl": ""},
+                                "content": "私聊",
+                                "parentId": "c1",
+                            }
+                        ],
+                        "parentId": "text",
+                    }
+                ],
+            }
+        ],
+    }
+    content_id = management.api_crawler_push(payload)["content_ids"][0]
+    content = management.get_content_detail(content_id)["content"]
+    captured = {}
+
+    def fake_service_post_json(base_url, path, body, timeout=30):
+        captured["body"] = body
+        return {
+            "content_id": body["content_id"],
+            "text_score": 0.0,
+            "risk_level": "none",
+            "risk_types": ["normal_discussion"],
+            "hit_keywords": [],
+            "brand_entities": [],
+            "contact_entities": [],
+            "field_results": [],
+            "explanation": "未发现明显烟草交易风险表达。",
+            "model_version": "text-risk-v0.1.0",
+        }
+
+    monkeypatch.setattr(management, "service_post_json", fake_service_post_json)
+    result = management.text_service_analyze_content(content)
+
+    assert captured["body"]["account_bio"] == "主页有方式"
+    assert captured["body"]["comments"] == ["买家 想要一条 多少钱一条", "普通作者 主页有方式 私聊"]
+    assert result["text_risk_score"] >= 0.5
+    assert {"一条", "私聊"}.issubset({item["word"] for item in result["hit_keywords"]})
