@@ -65,6 +65,10 @@ def rows_to_list(rows):
     return [dict(row) for row in rows]
 
 
+def table_columns(conn, table):
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
 def json_loads(value, default):
     if not value:
         return default
@@ -72,6 +76,69 @@ def json_loads(value, default):
         return json.loads(value)
     except json.JSONDecodeError:
         return default
+
+
+def media_content_type(path):
+    suffix = path.suffix.lower()
+    return {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+        ".mp4": "video/mp4",
+        ".webm": "video/webm",
+        ".mov": "video/quicktime",
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".m4a": "audio/mp4",
+        ".aac": "audio/aac",
+        ".flac": "audio/flac",
+        ".ogg": "audio/ogg",
+    }.get(suffix, "application/octet-stream")
+
+
+def local_media_token(path):
+    encoded = base64.urlsafe_b64encode(str(path.resolve()).encode("utf-8")).decode("ascii").rstrip("=")
+    return f"/media/local/{encoded}/{path.name}"
+
+
+def decode_local_media_token(token):
+    padding = "=" * (-len(token) % 4)
+    try:
+        return Path(base64.urlsafe_b64decode((token + padding).encode("ascii")).decode("utf-8"))
+    except Exception:
+        return None
+
+
+def local_media_allowed(path):
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    allowed_roots = [ROOT, Path("/tmp")]
+    return resolved.exists() and resolved.is_file() and any(root == resolved or root in resolved.parents for root in allowed_roots)
+
+
+def public_media_url(media_url):
+    if not media_url:
+        return ""
+    parsed = urlparse(media_url)
+    if parsed.scheme in {"http", "https"}:
+        return media_url
+    media_path = resolve_media_path(media_url)
+    if media_path and local_media_allowed(media_path):
+        return local_media_token(media_path)
+    return media_url
+
+
+CONTENT_ITEM_EXTRA_COLUMNS = {
+    "crawler_type": "TEXT DEFAULT ''",
+    "crawler_id": "TEXT DEFAULT ''",
+    "author_json": "TEXT DEFAULT ''",
+    "media_list": "TEXT DEFAULT ''",
+    "raw_payload": "TEXT DEFAULT ''",
+}
 
 
 SCHEMA = """
@@ -91,6 +158,24 @@ CREATE TABLE IF NOT EXISTS content_items (
   risk_score REAL DEFAULT 0,
   risk_level TEXT DEFAULT '无风险',
   review_status TEXT DEFAULT 'unreviewed',
+  crawler_type TEXT DEFAULT '',
+  crawler_id TEXT DEFAULT '',
+  author_json TEXT DEFAULT '',
+  media_list TEXT DEFAULT '',
+  raw_payload TEXT DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS crawler_comments (
+  id TEXT PRIMARY KEY,
+  content_id TEXT NOT NULL,
+  comment_type TEXT NOT NULL,
+  parent_comment_id TEXT DEFAULT '',
+  sender_json TEXT DEFAULT '',
+  content TEXT DEFAULT '',
+  date TEXT DEFAULT '',
+  raw_payload TEXT DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -208,6 +293,10 @@ def init_db():
     DATA_DIR.mkdir(exist_ok=True)
     with db() as conn:
         conn.executescript(SCHEMA)
+        existing_columns = table_columns(conn, "content_items")
+        for column, definition in CONTENT_ITEM_EXTRA_COLUMNS.items():
+            if column not in existing_columns:
+                conn.execute(f"ALTER TABLE content_items ADD COLUMN {column} {definition}")
         if conn.execute("SELECT COUNT(*) FROM model_configs").fetchone()[0] == 0:
             conn.executemany("INSERT INTO model_configs VALUES (?,?,?,?,?,?,?,?,?)", MODELS)
         else:
@@ -426,7 +515,8 @@ def vision_service_status(selected_model_id=None):
             "ocr": data.get("ocr", {}).get("engine", "-"),
             "ocr_mock": data.get("ocr", {}).get("mock", "-"),
         },
-        "ready": not bool(detector.get("mock", True)),
+        "ready": True,
+        "real_model_ready": not bool(detector.get("mock", True)),
         "mock": detector.get("mock", True),
     }
 
@@ -495,14 +585,15 @@ def service_post_file(base_url, path, file_payload, fields=None, timeout=120):
 
 
 def text_service_analyze_content(content):
+    comment_texts = content_comment_texts(content["id"])
     payload = {
         "content_id": content["id"],
         "platform": content["platform"],
         "title": content["title"] or "",
         "description": content["raw_text"] or "",
         "account_name": content["account_name"] or "",
-        "account_bio": "",
-        "comments": [content["raw_text"]] if content["content_type"] == "评论" and content["raw_text"] else [],
+        "account_bio": (json_loads(content.get("author_json"), {}) or {}).get("description", ""),
+        "comments": comment_texts or ([content["raw_text"]] if content["content_type"] == "评论" and content["raw_text"] else []),
         "ocr_texts": [],
         "asr_texts": [],
         "content_url": content["content_url"] or "",
@@ -728,13 +819,17 @@ def visual_result_to_detector_result(visual_result, model_id=None):
             },
         })
     evidence = visual_result.get("evidence_frames") or []
+    annotated_image = ""
+    if evidence and isinstance(evidence[0], dict):
+        image_path = evidence[0].get("image_path") or ""
+        annotated_image = "/" + image_path.lstrip("/") if image_path and not image_path.startswith("data:") else image_path
     return {
         "detected": bool(detections),
         "confidence": max([item["confidence"] for item in detections], default=0),
         "image_risk_score": float(visual_result.get("visual_score") or 0),
         "detected_objects": [item["class_name"] for item in detections],
         "detections": detections,
-        "annotated_image": evidence[0].get("image_path") if evidence and isinstance(evidence[0], dict) else "",
+        "annotated_image": annotated_image,
         "model_id": model_id or "vision-service",
         "model_name": "tobacco-vision-risk-service",
         "model_version": visual_result.get("model_version", "vision-tobacco-v0.1.0"),
@@ -957,9 +1052,16 @@ def get_content_detail(content_id):
         results = rows_to_list(conn.execute("SELECT * FROM recognition_results WHERE content_id=? ORDER BY created_at", (content_id,)).fetchall())
         reviews = rows_to_list(conn.execute("SELECT * FROM review_records WHERE content_id=? ORDER BY review_time DESC", (content_id,)).fetchall())
         pushes = rows_to_list(conn.execute("SELECT * FROM push_logs WHERE content_id=? ORDER BY push_time DESC", (content_id,)).fetchall())
+        comments = rows_to_list(conn.execute("SELECT * FROM crawler_comments WHERE content_id=? ORDER BY date, id", (content_id,)).fetchall())
     for item in results:
         item["result"] = json_loads(item.pop("result_json"), {})
-    return {"content": content, "results": results, "reviews": reviews, "push_logs": pushes}
+    for item in comments:
+        item["sender"] = json_loads(item.pop("sender_json"), {})
+        item["raw"] = json_loads(item.pop("raw_payload"), {})
+    content["media_preview_url"] = public_media_url(content.get("media_url", ""))
+    content["author"] = json_loads(content.get("author_json"), {})
+    content["media_list_parsed"] = json_loads(content.get("media_list"), [])
+    return {"content": content, "results": results, "reviews": reviews, "push_logs": pushes, "comments": comments}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -976,6 +1078,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_text(self, text, status=200, content_type="text/plain; charset=utf-8"):
         body = text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_bytes(self, body, status=200, content_type="application/octet-stream"):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -1039,6 +1148,18 @@ class Handler(BaseHTTPRequestHandler):
 
     def serve_static(self):
         path = urlparse(self.path).path
+        if path.startswith("/media/local/"):
+            parts = path.split("/")
+            token = parts[3] if len(parts) >= 4 else ""
+            file_path = decode_local_media_token(token)
+            if file_path and local_media_allowed(file_path):
+                return self.send_bytes(file_path.read_bytes(), 200, media_content_type(file_path))
+            return self.send_json({"error": "not found"}, 404)
+        if path.startswith("/storage/evidence/"):
+            file_path = ROOT / path.lstrip("/")
+            if file_path.exists() and file_path.is_file() and (ROOT / "storage" / "evidence") in file_path.resolve().parents:
+                return self.send_bytes(file_path.read_bytes(), 200, media_content_type(file_path))
+            return self.send_json({"error": "not found"}, 404)
         file_path = STATIC_DIR / ("index.html" if path in {"/", ""} else path.lstrip("/"))
         if not file_path.exists() or not file_path.is_file() or STATIC_DIR not in file_path.resolve().parents:
             file_path = STATIC_DIR / "index.html"
@@ -1110,6 +1231,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(service_post_json(TEXT_SERVICE_URL, "/infer/content", payload))
             if path == "/api/contents":
                 return self.send_json(api_create_content(payload), 201)
+            if path == "/api/crawler/push":
+                result = api_crawler_push(payload)
+                return self.send_json(result, 201 if result.get("success") else 400)
             if m := re.match(r"^/api/contents/([^/]+)/recognize$", path):
                 detail = recognize_content(m.group(1))
                 return self.send_json(detail or {"error": "not found"}, 200 if detail else 404)
@@ -1158,6 +1282,7 @@ class Handler(BaseHTTPRequestHandler):
                 with db() as conn:
                     conn.execute("DELETE FROM content_items WHERE id=?", (m.group(1),))
                     conn.execute("DELETE FROM recognition_results WHERE content_id=?", (m.group(1),))
+                    conn.execute("DELETE FROM crawler_comments WHERE content_id=?", (m.group(1),))
                 return self.send_json({"success": True})
             if m := re.match(r"^/api/rules/([^/]+)$", path):
                 with db() as conn:
@@ -1210,6 +1335,225 @@ def api_contents(qs):
     sql += " ORDER BY collect_time DESC"
     with db() as conn:
         return rows_to_list(conn.execute(sql, args).fetchall())
+
+
+def content_comment_texts(content_id):
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT content FROM crawler_comments WHERE content_id=? AND content<>'' ORDER BY date, id",
+            (content_id,),
+        ).fetchall()
+    return [row["content"] for row in rows]
+
+
+def first_text(*values):
+    for value in values:
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def ensure_list(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def safe_crawler_id(platform, crawler_type, item_id):
+    raw = first_text(platform, "unknown"), first_text(crawler_type, "content"), first_text(item_id, uuid.uuid4().hex)
+    value = "_".join(raw)
+    return re.sub(r"[^0-9A-Za-z_\-\u4e00-\u9fff]+", "_", value).strip("_")[:120]
+
+
+def crawler_content_type(item, crawler_type):
+    typ = (crawler_type or "").lower()
+    if typ == "video" or item.get("mediaList"):
+        return "视频"
+    if item.get("imageList"):
+        return "图片"
+    if item.get("videoUrl"):
+        return "视频"
+    return "文本"
+
+
+def crawler_media_list(item):
+    if item.get("mediaList") is not None:
+        return [str(v) for v in ensure_list(item.get("mediaList")) if v]
+    if item.get("videoUrl") is not None:
+        return [str(v) for v in ensure_list(item.get("videoUrl")) if v]
+    if item.get("imageList") is not None:
+        return [str(v) for v in ensure_list(item.get("imageList")) if v]
+    return []
+
+
+def crawler_raw_text(item):
+    return first_text(item.get("description"), item.get("content"))
+
+
+def flatten_crawler_comments(comments):
+    flattened = []
+    for comment in ensure_list(comments):
+        if not isinstance(comment, dict):
+            continue
+        flattened.append(("comment", comment))
+        for sub_comment in ensure_list(comment.get("subComments")):
+            if isinstance(sub_comment, dict):
+                flattened.append(("sub_comment", sub_comment))
+    return flattened
+
+
+def upsert_crawler_comments(conn, content_id, comments):
+    seen = set()
+    t = now()
+    for comment_type, comment in flatten_crawler_comments(comments):
+        comment_id = first_text(comment.get("id"))
+        if not comment_id:
+            comment_id = uuid.uuid5(uuid.NAMESPACE_URL, json.dumps(comment, ensure_ascii=False, sort_keys=True)).hex
+        cid = safe_crawler_id(content_id, comment_type, comment_id)
+        seen.add(cid)
+        sender = comment.get("sender") if isinstance(comment.get("sender"), dict) else {}
+        conn.execute(
+            """INSERT INTO crawler_comments
+            (id,content_id,comment_type,parent_comment_id,sender_json,content,date,raw_payload,created_at,updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET
+              content_id=excluded.content_id,
+              comment_type=excluded.comment_type,
+              parent_comment_id=excluded.parent_comment_id,
+              sender_json=excluded.sender_json,
+              content=excluded.content,
+              date=excluded.date,
+              raw_payload=excluded.raw_payload,
+              updated_at=excluded.updated_at""",
+            (
+                cid,
+                content_id,
+                comment_type,
+                first_text(comment.get("parentId")),
+                json.dumps(sender, ensure_ascii=False),
+                first_text(comment.get("content")),
+                first_text(comment.get("date")),
+                json.dumps(comment, ensure_ascii=False),
+                t,
+                t,
+            ),
+        )
+    if seen:
+        placeholders = ",".join("?" for _ in seen)
+        conn.execute(
+            f"DELETE FROM crawler_comments WHERE content_id=? AND id NOT IN ({placeholders})",
+            [content_id, *seen],
+        )
+    else:
+        conn.execute("DELETE FROM crawler_comments WHERE content_id=?", (content_id,))
+
+
+def crawler_item_to_content(platform, crawler_type, item):
+    author = item.get("author") if isinstance(item.get("author"), dict) else {}
+    media = crawler_media_list(item)
+    crawler_id = first_text(item.get("id"))
+    content_id = safe_crawler_id(platform, crawler_type, crawler_id)
+    return {
+        "id": content_id,
+        "platform": first_text(platform, "未知平台"),
+        "content_type": crawler_content_type(item, crawler_type),
+        "title": first_text(item.get("title"), crawler_raw_text(item), "未命名内容"),
+        "account_name": first_text(author.get("nickname"), author.get("id"), "未知账号"),
+        "account_url": first_text(author.get("avatarUrl")),
+        "content_url": first_text(item.get("url")),
+        "raw_text": crawler_raw_text(item),
+        "media_url": media[0] if media else "",
+        "publish_time": first_text(item.get("date")),
+        "crawler_type": first_text(crawler_type),
+        "crawler_id": crawler_id,
+        "author_json": json.dumps(author, ensure_ascii=False),
+        "media_list": json.dumps(media, ensure_ascii=False),
+        "raw_payload": json.dumps(item, ensure_ascii=False),
+    }
+
+
+def api_crawler_push(payload):
+    if not isinstance(payload, dict):
+        return {"error": "payload must be object"}
+    platform = first_text(payload.get("platform"), "未知平台")
+    crawler_type = first_text(payload.get("type"), "content")
+    items = payload.get("data")
+    if not isinstance(items, list):
+        return {"error": "data must be list"}
+    t = now()
+    accepted = []
+    created = 0
+    updated = 0
+    with db() as conn:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            content = crawler_item_to_content(platform, crawler_type, item)
+            exists = conn.execute("SELECT 1 FROM content_items WHERE id=?", (content["id"],)).fetchone()
+            if exists:
+                conn.execute(
+                    """UPDATE content_items SET
+                      platform=?,content_type=?,title=?,account_name=?,account_url=?,content_url=?,raw_text=?,media_url=?,
+                      publish_time=?,collect_time=?,crawler_type=?,crawler_id=?,author_json=?,media_list=?,raw_payload=?,updated_at=?
+                      WHERE id=?""",
+                    (
+                        content["platform"],
+                        content["content_type"],
+                        content["title"],
+                        content["account_name"],
+                        content["account_url"],
+                        content["content_url"],
+                        content["raw_text"],
+                        content["media_url"],
+                        content["publish_time"] or t,
+                        t,
+                        content["crawler_type"],
+                        content["crawler_id"],
+                        content["author_json"],
+                        content["media_list"],
+                        content["raw_payload"],
+                        t,
+                        content["id"],
+                    ),
+                )
+                updated += 1
+            else:
+                conn.execute(
+                    """INSERT INTO content_items
+                    (id,platform,content_type,title,account_name,account_url,content_url,raw_text,media_url,publish_time,collect_time,
+                     recognize_status,risk_score,risk_level,review_status,crawler_type,crawler_id,author_json,media_list,raw_payload,created_at,updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        content["id"],
+                        content["platform"],
+                        content["content_type"],
+                        content["title"],
+                        content["account_name"],
+                        content["account_url"],
+                        content["content_url"],
+                        content["raw_text"],
+                        content["media_url"],
+                        content["publish_time"] or t,
+                        t,
+                        "pending",
+                        0,
+                        "无风险",
+                        "unreviewed",
+                        content["crawler_type"],
+                        content["crawler_id"],
+                        content["author_json"],
+                        content["media_list"],
+                        content["raw_payload"],
+                        t,
+                        t,
+                    ),
+                )
+                created += 1
+            upsert_crawler_comments(conn, content["id"], item.get("comments"))
+            accepted.append(content["id"])
+    return {"success": True, "accepted": len(accepted), "created": created, "updated": updated, "content_ids": accepted}
 
 
 def api_create_content(payload):

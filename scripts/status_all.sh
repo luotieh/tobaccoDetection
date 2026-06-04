@@ -34,7 +34,7 @@ health() {
   local name="$1"
   local url="$2"
   local body
-  if body="$(curl -fsS --max-time 2 "$url" 2>/dev/null)"; then
+  if body="$(curl --noproxy "*" -fsS --max-time 5 "$url" 2>/dev/null)"; then
     printf "%-12s ok       %s\n" "$name" "$body"
   else
     printf "%-12s failed   %s\n" "$name" "$url"

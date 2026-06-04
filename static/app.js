@@ -447,24 +447,148 @@ async function renderDetail(id) {
       <button class="secondary" onclick="setRoute('contents')">返回列表</button>
       <div class="actions-cell"><button onclick="recognize('${id}')">执行识别</button><button class="secondary" onclick="openReview('${id}')">人工审核</button><button class="secondary" onclick="queuePush('${id}')">加入推送队列</button></div>
     </div>
-    <div class="grid-2">
-      <div class="panel"><h3 class="section-title">基础信息</h3><div class="kv">
-        <b>平台</b><span>${c.platform}</span><b>内容类型</b><span>${c.content_type}</span><b>标题</b><span>${c.title}</span><b>账号</b><span>${c.account_name}</span>
-        <b>原始链接</b><span>${c.content_url || "-"}</span><b>发布时间</b><span>${c.publish_time}</span><b>采集时间</b><span>${c.collect_time}</span>
-      </div></div>
-      <div class="panel"><h3 class="section-title">多模态融合结果</h3>${resultBox(byType.fusion, "fusion")}</div>
-    </div>
-    <div class="panel"><h3 class="section-title">原始内容</h3><div class="pre">${c.raw_text || "暂无文本"}\n${c.media_url ? "媒体地址：" + c.media_url : ""}</div>${mediaPreview(c.media_url)}</div>
-    <div class="grid-3">
-      <div class="panel"><h3 class="section-title">文本识别结果</h3>${resultBox(byType.text)}</div>
-      <div class="panel"><h3 class="section-title">图像识别结果</h3>${resultBox(byType.image)}</div>
-      <div class="panel"><h3 class="section-title">语音识别结果</h3>${resultBox(byType.audio)}</div>
-    </div>
-    <div class="grid-2">
-      <div class="panel"><h3 class="section-title">审核记录</h3>${simpleList(detail.reviews, r => `${statusText(r.review_status)}｜${r.reviewer}｜${r.review_time}<br>${r.review_opinion || ""}`)}</div>
-      <div class="panel"><h3 class="section-title">推送日志</h3>${simpleList(detail.push_logs, r => `${statusText(r.push_status)}｜${r.report_id || "-"}｜重试 ${r.retry_count}<br>${r.error_message || r.push_time || ""}`)}</div>
+    <div class="detail-layout">
+      <aside class="phone-column">
+        ${phonePostPreview(c, byType)}
+      </aside>
+      <div class="detail-main">
+        <div class="grid-2">
+          <div class="panel"><h3 class="section-title">基础信息</h3><div class="kv">
+            <b>平台</b><span>${escapeHtml(c.platform)}</span><b>内容类型</b><span>${escapeHtml(c.content_type)}</span><b>标题</b><span>${escapeHtml(c.title)}</span><b>账号</b><span>${escapeHtml(c.account_name)}</span>
+            <b>原始链接</b><span>${escapeHtml(c.content_url || "-")}</span><b>发布时间</b><span>${escapeHtml(c.publish_time)}</span><b>采集时间</b><span>${escapeHtml(c.collect_time)}</span>
+          </div></div>
+          <div class="panel"><h3 class="section-title">多模态融合结果</h3>${resultBox(byType.fusion, "fusion")}</div>
+        </div>
+        <div class="grid-3">
+          <div class="panel"><h3 class="section-title">文本识别结果</h3>${resultBox(byType.text)}</div>
+          <div class="panel"><h3 class="section-title">图像识别结果</h3>${resultBox(byType.image)}</div>
+          <div class="panel"><h3 class="section-title">语音识别结果</h3>${resultBox(byType.audio)}</div>
+        </div>
+        <div class="grid-2">
+          <div class="panel"><h3 class="section-title">审核记录</h3>${simpleList(detail.reviews, r => `${statusText(r.review_status)}｜${escapeHtml(r.reviewer)}｜${escapeHtml(r.review_time)}<br>${escapeHtml(r.review_opinion || "")}`)}</div>
+          <div class="panel"><h3 class="section-title">推送日志</h3>${simpleList(detail.push_logs, r => `${statusText(r.push_status)}｜${escapeHtml(r.report_id || "-")}｜重试 ${r.retry_count}<br>${escapeHtml(r.error_message || r.push_time || "")}`)}</div>
+        </div>
+      </div>
     </div>
   `;
+}
+
+function escapeHtml(value) {
+  return String(value ?? "").replace(/[&<>"']/g, ch => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
+  })[ch]);
+}
+
+function phonePostPreview(c, byType) {
+  const platformClass = platformTone(c.platform);
+  const transcript = byType.audio?.transcript || "";
+  const ocrText = (byType.image?.ocr_text || []).join(" ");
+  return `
+    <div class="phone-shell">
+      <div class="phone-island"></div>
+      <div class="phone-screen ${platformClass}">
+        <div class="phone-wallpaper"></div>
+        <div class="phone-status"><span>09:41</span><span>5G 100%</span></div>
+        <div class="phone-appbar glass">
+          <div>
+            <b>${escapeHtml(c.platform)}</b>
+            <span>${escapeHtml(c.content_type)}内容</span>
+          </div>
+          <span class="phone-dot"></span>
+        </div>
+        <article class="phone-post glass">
+        <header class="phone-author">
+          <div class="avatar">${escapeHtml((c.account_name || "?").slice(0, 1))}</div>
+          <div>
+            <strong>${escapeHtml(c.account_name || "未知账号")}</strong>
+            <span>${escapeHtml(c.publish_time || c.collect_time || "-")}</span>
+          </div>
+        </header>
+        <h3>${escapeHtml(c.title || "未命名内容")}</h3>
+        ${phoneMedia(c, byType)}
+        <p class="phone-text">${escapeHtml(c.raw_text || "暂无正文内容")}</p>
+        ${transcript ? `<div class="phone-transcript"><b>语音转写</b><span>${escapeHtml(transcript)}</span></div>` : ""}
+        ${ocrText ? `<div class="phone-transcript"><b>画面文字</b><span>${escapeHtml(ocrText)}</span></div>` : ""}
+        <footer class="phone-actions">
+          <span>点赞 ${postMetric(c.id, 37, 860)}</span>
+          <span>评论 ${postMetric(c.title, 5, 96)}</span>
+          <span>分享 ${postMetric(c.account_name, 2, 54)}</span>
+        </footer>
+        </article>
+      </div>
+    </div>
+  `;
+}
+
+function platformTone(platform) {
+  if (platform === "抖音") return "tone-douyin";
+  if (platform === "快手") return "tone-kuaishou";
+  if (platform === "小红书") return "tone-redbook";
+  if (platform === "微博") return "tone-weibo";
+  return "tone-default";
+}
+
+function postMetric(seed, min, max) {
+  const text = String(seed || "");
+  const sum = [...text].reduce((acc, ch) => acc + ch.charCodeAt(0), 0);
+  return min + (sum % Math.max(1, max - min + 1));
+}
+
+function evidenceImageUrl(byType) {
+  const frame = byType.image?.visual_service_result?.evidence_frames?.[0]?.image_path;
+  return frame ? "/" + String(frame).replace(/^\/+/, "") : "";
+}
+
+function phoneMedia(c, byType = {}) {
+  const mediaUrl = c.media_preview_url || c.media_url || "";
+  const type = c.content_type || "";
+  const fallbackImage = evidenceImageUrl(byType);
+  if (!mediaUrl) {
+    if (fallbackImage) {
+      return `<div class="phone-media image"><img src="${escapeHtml(fallbackImage)}" alt="识别证据图"><span>识别证据图</span></div>`;
+    }
+    return `<div class="phone-media empty">无媒体内容</div>`;
+  }
+  const safeUrl = escapeHtml(mediaUrl);
+  if (type === "视频" || /\.(mp4|mov|avi|mkv|webm)$/i.test(mediaUrl)) {
+    const fallbackAttr = fallbackImage ? ` data-fallback="${escapeHtml(fallbackImage)}"` : "";
+    return `<div class="phone-media video"><video src="${safeUrl}"${fallbackAttr} controls muted playsinline onerror="swapPhoneVideoFallback(this);"></video><span>视频内容</span></div>`;
+  }
+  if (type === "音频" || /\.(wav|mp3|m4a|aac|flac|ogg)$/i.test(mediaUrl)) {
+    return `<div class="phone-media audio">
+      <div class="audio-art"><span></span></div>
+      <audio src="${safeUrl}" controls preload="metadata"></audio>
+      <span>${escapeHtml((c.media_url || mediaUrl).split("/").pop() || "音频内容")}</span>
+    </div>`;
+  }
+  if (type === "图片" || /^https?:\/\//.test(mediaUrl) || /\.(jpg|jpeg|png|webp|bmp|gif)$/i.test(mediaUrl)) {
+    const fallbackAttr = fallbackImage ? ` data-fallback="${escapeHtml(fallbackImage)}"` : "";
+    return `<div class="phone-media image"><img src="${safeUrl}"${fallbackAttr} alt="帖子图片" onerror="swapPhoneImageFallback(this);"><span>图片内容</span></div>`;
+  }
+  return `<div class="phone-media file"><span>${escapeHtml(mediaUrl)}</span></div>`;
+}
+
+function swapPhoneImageFallback(img) {
+  const fallback = img.dataset.fallback;
+  if (fallback && img.src !== fallback) {
+    img.removeAttribute("data-fallback");
+    img.src = fallback;
+    return;
+  }
+  img.parentElement.classList.add("failed");
+  img.remove();
+}
+
+function swapPhoneVideoFallback(video) {
+  const fallback = video.dataset.fallback;
+  if (fallback) {
+    video.parentElement.classList.remove("video");
+    video.parentElement.classList.add("image");
+    video.parentElement.innerHTML = `<img src="${fallback}" alt="视频证据帧"><span>视频证据帧</span>`;
+    return;
+  }
+  video.parentElement.classList.add("failed");
+  video.remove();
 }
 
 function mediaPreview(mediaUrl) {

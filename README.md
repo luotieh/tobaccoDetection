@@ -138,6 +138,7 @@ DELETE /api/contents/{id}
 POST   /api/contents/{id}/recognize
 POST   /api/contents/{id}/review
 POST   /api/contents/{id}/push-queue
+POST   /api/crawler/push
 
 GET    /api/models
 PUT    /api/models/{id}
@@ -170,6 +171,16 @@ GET    /api/audio-service/status
 POST   /api/audio-service/infer-audio
 POST   /api/audio-service/infer-video-audio
 ```
+
+爬虫端可按 `docs/__init__.py` 中的 `ReturnData` 结构推送采集结果：
+
+```bash
+curl -X POST http://127.0.0.1:8000/api/crawler/push \
+  -H 'Content-Type: application/json' \
+  -d '{"platform":"小红书","type":"note","timeTook":1.2,"data":[]}'
+```
+
+管理端会将 `VideoData`/`NoteData` 转为内容列表记录，保留作者、媒体列表、原始 payload，并把一二级评论写入 `crawler_comments` 供文本识别使用。
 
 ## 视觉识别服务
 
