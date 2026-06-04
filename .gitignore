@@ -11,4 +11,14 @@ storage/results/*
 !storage/uploads/.gitkeep
 !storage/evidence/.gitkeep
 !storage/results/.gitkeep
+audio_storage/uploads/*
+audio_storage/audio/*
+audio_storage/evidence/*
+audio_storage/results/*
+!audio_storage/uploads/.gitkeep
+!audio_storage/audio/.gitkeep
+!audio_storage/evidence/.gitkeep
+!audio_storage/results/.gitkeep
 .pytest_cache/
+.runtime/
+.env

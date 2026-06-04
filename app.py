@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import base64
 import cgi
+import http.client
 import json
 import os
 import random
@@ -8,6 +9,7 @@ import re
 import sqlite3
 import sys
 import tempfile
+import uuid
 from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
@@ -35,6 +37,9 @@ MODEL_REGISTRY = {
     },
 }
 DEFAULT_DETECTOR_MODEL_ID = os.environ.get("SMOKING_DETECTOR_MODEL", "basant-yolo26s")
+VISION_SERVICE_URL = os.environ.get("VISION_SERVICE_URL", "http://127.0.0.1:9000")
+TEXT_SERVICE_URL = os.environ.get("TEXT_SERVICE_URL", "http://127.0.0.1:8010")
+AUDIO_SERVICE_URL = os.environ.get("AUDIO_SERVICE_URL", "http://127.0.0.1:8020")
 _YOLO_MODELS = {}
 
 
@@ -60,6 +65,10 @@ def rows_to_list(rows):
     return [dict(row) for row in rows]
 
 
+def table_columns(conn, table):
+    return {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+
+
 def json_loads(value, default):
     if not value:
         return default
@@ -67,6 +76,69 @@ def json_loads(value, default):
         return json.loads(value)
     except json.JSONDecodeError:
         return default
+
+
+def media_content_type(path):
+    suffix = path.suffix.lower()
+    return {
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".png": "image/png",
+        ".webp": "image/webp",
+        ".gif": "image/gif",
+        ".mp4": "video/mp4",
+        ".webm": "video/webm",
+        ".mov": "video/quicktime",
+        ".mp3": "audio/mpeg",
+        ".wav": "audio/wav",
+        ".m4a": "audio/mp4",
+        ".aac": "audio/aac",
+        ".flac": "audio/flac",
+        ".ogg": "audio/ogg",
+    }.get(suffix, "application/octet-stream")
+
+
+def local_media_token(path):
+    encoded = base64.urlsafe_b64encode(str(path.resolve()).encode("utf-8")).decode("ascii").rstrip("=")
+    return f"/media/local/{encoded}/{path.name}"
+
+
+def decode_local_media_token(token):
+    padding = "=" * (-len(token) % 4)
+    try:
+        return Path(base64.urlsafe_b64decode((token + padding).encode("ascii")).decode("utf-8"))
+    except Exception:
+        return None
+
+
+def local_media_allowed(path):
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return False
+    allowed_roots = [ROOT, Path("/tmp")]
+    return resolved.exists() and resolved.is_file() and any(root == resolved or root in resolved.parents for root in allowed_roots)
+
+
+def public_media_url(media_url):
+    if not media_url:
+        return ""
+    parsed = urlparse(media_url)
+    if parsed.scheme in {"http", "https"}:
+        return media_url
+    media_path = resolve_media_path(media_url)
+    if media_path and local_media_allowed(media_path):
+        return local_media_token(media_path)
+    return media_url
+
+
+CONTENT_ITEM_EXTRA_COLUMNS = {
+    "crawler_type": "TEXT DEFAULT ''",
+    "crawler_id": "TEXT DEFAULT ''",
+    "author_json": "TEXT DEFAULT ''",
+    "media_list": "TEXT DEFAULT ''",
+    "raw_payload": "TEXT DEFAULT ''",
+}
 
 
 SCHEMA = """
@@ -86,6 +158,24 @@ CREATE TABLE IF NOT EXISTS content_items (
   risk_score REAL DEFAULT 0,
   risk_level TEXT DEFAULT '无风险',
   review_status TEXT DEFAULT 'unreviewed',
+  crawler_type TEXT DEFAULT '',
+  crawler_id TEXT DEFAULT '',
+  author_json TEXT DEFAULT '',
+  media_list TEXT DEFAULT '',
+  raw_payload TEXT DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS crawler_comments (
+  id TEXT PRIMARY KEY,
+  content_id TEXT NOT NULL,
+  comment_type TEXT NOT NULL,
+  parent_comment_id TEXT DEFAULT '',
+  sender_json TEXT DEFAULT '',
+  content TEXT DEFAULT '',
+  date TEXT DEFAULT '',
+  raw_payload TEXT DEFAULT '',
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
@@ -155,10 +245,10 @@ CREATE TABLE IF NOT EXISTS push_logs (
 
 
 MODELS = [
-    ("m_text_001", "文本交易意图识别模型", "text", "text-risk-v1.0", "/api/mock/text/analyze", 0.70, 30, 1, "识别标题、评论、账号简介中的违法售烟关键词和交易意图"),
+    ("m_text_001", "文本交易意图识别模型", "text", "text-risk-v0.1.0", "/api/text-service/infer-content", 0.70, 30, 1, "调用文本风险服务识别标题、正文、评论、OCR/ASR 文本中的违法售烟关键词和交易意图"),
     ("m_image_001", "Smoking-detection-YOLO26s 图像识别模型", "image", "Smoking-detection-YOLO26s/best.pt", "/api/image-detector/analyze", 0.50, 30, 1, "使用 Hugging Face basant18/Smoking-detection-YOLO26s 的 best.pt 识别图片中的香烟目标"),
     ("m_image_002", "Enos smoking-detection 图像识别模型", "image", "YOLOv11-Medium/best.pt", "/api/image-detector/analyze", 0.50, 30, 1, "使用 Hugging Face Enos-123/smoking-detection 的 best.pt 识别 cigarette 目标"),
-    ("m_audio_001", "语音交易话术识别模型", "audio", "audio-risk-v1.0", "/api/mock/audio/analyze", 0.70, 60, 1, "短视频口播转写和交易话术识别"),
+    ("m_audio_001", "语音交易话术识别模型", "audio", "audio-risk-v0.1.0", "/api/audio-service/infer-video-audio", 0.70, 60, 1, "调用语音服务完成音视频 ASR 转写、关键词识别和交易话术评分"),
     ("m_fusion_001", "多模态融合评分模型", "fusion", "fusion-risk-v1.0", "/api/mock/fusion/analyze", 0.80, 30, 1, "综合文本、图像、语音结果输出最终风险评分"),
 ]
 
@@ -203,6 +293,10 @@ def init_db():
     DATA_DIR.mkdir(exist_ok=True)
     with db() as conn:
         conn.executescript(SCHEMA)
+        existing_columns = table_columns(conn, "content_items")
+        for column, definition in CONTENT_ITEM_EXTRA_COLUMNS.items():
+            if column not in existing_columns:
+                conn.execute(f"ALTER TABLE content_items ADD COLUMN {column} {definition}")
         if conn.execute("SELECT COUNT(*) FROM model_configs").fetchone()[0] == 0:
             conn.executemany("INSERT INTO model_configs VALUES (?,?,?,?,?,?,?,?,?)", MODELS)
         else:
@@ -290,6 +384,376 @@ def analyze_image(payload):
     }
 
 
+def resolve_media_path(media_url):
+    if not media_url:
+        return None
+    parsed = urlparse(media_url)
+    if parsed.scheme in {"http", "https"}:
+        return None
+    raw_path = parsed.path if parsed.scheme else media_url
+    path = Path(raw_path)
+    candidates = []
+    if path.is_absolute():
+        candidates.append(path)
+    else:
+        candidates.extend([ROOT / raw_path.lstrip("/"), ROOT / "static" / raw_path.lstrip("/")])
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved.exists() and resolved.is_file():
+            return resolved
+    return None
+
+
+def vision_service_path(path):
+    parsed = urlparse(VISION_SERVICE_URL)
+    return f"{parsed.path.rstrip('/')}{path}" if parsed.path else path
+
+
+def call_vision_image_service(content_id, image_path, conf=0.35, model_id=None):
+    parsed = urlparse(VISION_SERVICE_URL)
+    if parsed.scheme not in {"http", "https"}:
+        raise RuntimeError("VISION_SERVICE_URL 仅支持 http/https")
+    boundary = f"----tobacco-{uuid.uuid4().hex}"
+    data = image_path.read_bytes()
+    fields = [
+        ("content_id", content_id.encode("utf-8"), None),
+        ("conf", str(conf).encode("utf-8"), None),
+        ("save_evidence", b"true", None),
+        ("file", data, image_path.name),
+    ]
+    if model_id:
+        fields.insert(2, ("model_id", str(model_id).encode("utf-8"), None))
+    body = bytearray()
+    for name, value, filename in fields:
+        body.extend(f"--{boundary}\r\n".encode("utf-8"))
+        if filename:
+            body.extend(f'Content-Disposition: form-data; name="{name}"; filename="{filename}"\r\n'.encode("utf-8"))
+            body.extend(b"Content-Type: application/octet-stream\r\n\r\n")
+        else:
+            body.extend(f'Content-Disposition: form-data; name="{name}"\r\n\r\n'.encode("utf-8"))
+        body.extend(value)
+        body.extend(b"\r\n")
+    body.extend(f"--{boundary}--\r\n".encode("utf-8"))
+    conn_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    conn = conn_cls(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), timeout=30)
+    try:
+        conn.request(
+            "POST",
+            vision_service_path("/infer/image"),
+            body=bytes(body),
+            headers={"Content-Type": f"multipart/form-data; boundary={boundary}", "Content-Length": str(len(body))},
+        )
+        resp = conn.getresponse()
+        raw = resp.read().decode("utf-8")
+        if resp.status >= 400:
+            raise RuntimeError(raw or f"视觉服务返回 HTTP {resp.status}")
+        return json.loads(raw)
+    finally:
+        conn.close()
+
+
+def call_vision_video_service(content_id, video_path, conf=0.35, model_id=None):
+    parsed = urlparse(VISION_SERVICE_URL)
+    if parsed.scheme not in {"http", "https"}:
+        raise RuntimeError("VISION_SERVICE_URL 仅支持 http/https")
+    fields = {"content_id": content_id, "conf": conf}
+    if model_id:
+        fields["model_id"] = model_id
+    return service_post_file(
+        VISION_SERVICE_URL,
+        "/infer/video",
+        {"data": video_path.read_bytes(), "filename": video_path.name},
+        fields=fields,
+        timeout=180,
+    )
+
+
+def call_vision_image_service_bytes(content_id, image_bytes, filename, conf=0.35, model_id=None):
+    suffix = Path(filename or "upload.jpg").suffix.lower()
+    if suffix not in {".jpg", ".jpeg", ".png", ".bmp", ".webp"}:
+        suffix = ".jpg"
+    with tempfile.NamedTemporaryFile(suffix=suffix, delete=True) as tmp:
+        tmp.write(image_bytes)
+        tmp.flush()
+        return call_vision_image_service(content_id, Path(tmp.name), conf=conf, model_id=model_id)
+
+
+def vision_service_status(selected_model_id=None):
+    parsed = urlparse(VISION_SERVICE_URL)
+    if parsed.scheme not in {"http", "https"}:
+        raise RuntimeError("VISION_SERVICE_URL 仅支持 http/https")
+    suffix = f"?model_id={selected_model_id}" if selected_model_id else ""
+    data = service_get(VISION_SERVICE_URL, f"/models/info{suffix}", timeout=10)
+    detector = data.get("detector", {})
+    current_id = detector.get("model_id") or selected_model_id or "default"
+    raw_models = detector.get("available_models") or [{"id": current_id, "weights": detector.get("weights", ""), "model_exists": detector.get("model_exists", False), "model_size_mb": detector.get("model_size_mb", 0)}]
+    models = [
+        {
+            "id": item.get("id"),
+            "name": item.get("id"),
+            "version": Path(item.get("weights", "")).name or item.get("id"),
+            "description": "视觉服务 YOLO 模型",
+            "model_path": item.get("weights", ""),
+            "model_exists": item.get("model_exists", False),
+            "model_size_mb": item.get("model_size_mb", 0),
+        }
+        for item in raw_models
+    ]
+    current = next((item for item in models if item["id"] == current_id), models[0] if models else {})
+    return {
+        **current,
+        "service_url": VISION_SERVICE_URL,
+        "service_mode": "vision-service",
+        "current_model_id": current_id,
+        "models": models,
+        "dependencies": {
+            "vision_service": "ok",
+            "detector_type": detector.get("type", "-"),
+            "ocr": data.get("ocr", {}).get("engine", "-"),
+            "ocr_mock": data.get("ocr", {}).get("mock", "-"),
+        },
+        "ready": True,
+        "real_model_ready": not bool(detector.get("mock", True)),
+        "mock": detector.get("mock", True),
+    }
+
+
+def service_request(base_url, method, path, body=None, content_type=None, timeout=60):
+    parsed = urlparse(base_url)
+    target = path if path.startswith("/") else f"/{path}"
+    if parsed.path and parsed.path != "/":
+        target = parsed.path.rstrip("/") + target
+    conn_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    conn = conn_cls(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), timeout=timeout)
+    headers = {}
+    if content_type:
+        headers["Content-Type"] = content_type
+    try:
+        conn.request(method, target, body=body, headers=headers)
+        resp = conn.getresponse()
+        raw = resp.read().decode("utf-8")
+        data = json.loads(raw) if raw else {}
+        if resp.status >= 400:
+            message = data.get("detail") or data.get("error") or raw or f"HTTP {resp.status}"
+            raise RuntimeError(message)
+        return data
+    finally:
+        conn.close()
+
+
+def service_get(base_url, path, timeout=10):
+    return service_request(base_url, "GET", path, timeout=timeout)
+
+
+def service_post_json(base_url, path, payload, timeout=60):
+    return service_request(
+        base_url,
+        "POST",
+        path,
+        body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        content_type="application/json; charset=utf-8",
+        timeout=timeout,
+    )
+
+
+def service_post_file(base_url, path, file_payload, fields=None, timeout=120):
+    boundary = f"----tobacco-{uuid.uuid4().hex}"
+    parts = []
+    for name, value in (fields or {}).items():
+        parts.append(
+            f"--{boundary}\r\nContent-Disposition: form-data; name=\"{name}\"\r\n\r\n{value}\r\n".encode("utf-8")
+        )
+    filename = file_payload["filename"]
+    parts.extend([
+        f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{filename}\"\r\n".encode("utf-8"),
+        b"Content-Type: application/octet-stream\r\n\r\n",
+        file_payload["data"],
+        b"\r\n",
+        f"--{boundary}--\r\n".encode("utf-8"),
+    ])
+    return service_request(
+        base_url,
+        "POST",
+        path,
+        body=b"".join(parts),
+        content_type=f"multipart/form-data; boundary={boundary}",
+        timeout=timeout,
+    )
+
+
+def text_service_analyze_content(content):
+    comment_texts = content_comment_texts(content["id"])
+    payload = {
+        "content_id": content["id"],
+        "platform": content["platform"],
+        "title": content["title"] or "",
+        "description": content["raw_text"] or "",
+        "account_name": content["account_name"] or "",
+        "account_bio": (json_loads(content.get("author_json"), {}) or {}).get("description", ""),
+        "comments": comment_texts or ([content["raw_text"]] if content["content_type"] == "评论" and content["raw_text"] else []),
+        "ocr_texts": [],
+        "asr_texts": [],
+        "content_url": content["content_url"] or "",
+    }
+    result = service_post_json(TEXT_SERVICE_URL, "/infer/content", payload)
+    result = merge_business_text_rules({"text": " ".join([payload["title"], payload["description"], payload["account_name"]])}, result)
+    result["text_risk_score"] = float(result.get("text_score") or 0)
+    result["model_version"] = result.get("model_version", "text-risk-v0.1.0")
+    result["service_mode"] = "text-service"
+    return result
+
+
+def audio_service_analyze_media(content, media_path):
+    media_type = "video" if content["content_type"] == "视频" or media_path.suffix.lower() in {".mp4", ".mov", ".avi", ".mkv"} else "audio"
+    endpoint = "/infer/video-audio" if media_type == "video" else "/infer/audio"
+    result = service_post_file(
+        AUDIO_SERVICE_URL,
+        endpoint,
+        {"data": media_path.read_bytes(), "filename": media_path.name},
+        fields={"content_id": content["id"], "save_evidence": "true"},
+        timeout=240,
+    )
+    result["audio_risk_score"] = float(result.get("audio_score") or 0)
+    result["model_version"] = result.get("model_version", "audio-risk-v0.1.0")
+    result["service_mode"] = "audio-service"
+    return result
+
+
+def text_service_status():
+    return {
+        "base_url": TEXT_SERVICE_URL,
+        "health": service_get(TEXT_SERVICE_URL, "/health"),
+        "models": service_get(TEXT_SERVICE_URL, "/models/info"),
+    }
+
+
+def audio_service_status():
+    return {
+        "base_url": AUDIO_SERVICE_URL,
+        "health": service_get(AUDIO_SERVICE_URL, "/health"),
+        "models": service_get(AUDIO_SERVICE_URL, "/models/info"),
+    }
+
+
+def merge_business_text_rules(payload, result):
+    text = (payload.get("text") or "").strip()
+    if not text:
+        return result
+    rules = enabled_rules()
+    matched = [r for r in rules if r["word"] and r["word"] in text]
+    if not matched:
+        return result
+
+    existing_words = {item.get("word") for item in result.get("hit_keywords", []) if isinstance(item, dict)}
+    additions = []
+    risk_types = set(result.get("risk_types") or [])
+    for rule in matched:
+        word = rule["word"]
+        if word not in existing_words:
+            start = text.find(word)
+            category = {
+                "keyword": "trade",
+                "blackword": "slang",
+                "brand": "brand",
+                "whitelist": "whitelist",
+                "region": "delivery",
+            }.get(rule["rule_type"], rule["rule_type"])
+            additions.append({
+                "word": word,
+                "normalized_word": word,
+                "category": category,
+                "dictionary": "management_rule_words",
+                "start": start,
+                "end": start + len(word) if start >= 0 else None,
+            })
+        if rule["rule_type"] == "keyword":
+            risk_types.update({"sale_intent", "trade_lead"})
+        elif rule["rule_type"] == "blackword":
+            risk_types.add("slang_mention")
+        elif rule["rule_type"] == "brand":
+            risk_types.add("brand_mention")
+        elif rule["rule_type"] == "whitelist":
+            risk_types.add("whitelist_context")
+        elif rule["rule_type"] == "region":
+            risk_types.add("regional_delivery_context")
+
+    if additions:
+        result["hit_keywords"] = (result.get("hit_keywords") or []) + additions
+    if risk_types:
+        result["risk_types"] = sorted(risk_types - {"normal_discussion"}) or sorted(risk_types)
+    positive_rules = [r for r in matched if r["rule_type"] != "whitelist"]
+    if positive_rules and result.get("risk_level") == "none":
+        result["risk_level"] = "low"
+        result["text_score"] = max(float(result.get("text_score") or 0), 0.5)
+    if positive_rules and result.get("explanation") == "未发现明显烟草交易风险表达。":
+        words = "、".join(r["word"] for r in positive_rules[:8])
+        result["explanation"] = f"文本命中管理端规则词库：{words}，需要结合上下文复核。"
+    return result
+
+
+def visual_result_to_image_result(visual_result, evidence_frame):
+    detections = visual_result.get("detected_objects") or []
+    ocr_items = visual_result.get("ocr_text") or []
+    brands = visual_result.get("brand_results") or []
+    return {
+        "image_risk_score": float(visual_result.get("visual_score") or 0),
+        "detected_objects": [item.get("label_zh") or item.get("class_name") for item in detections],
+        "brand": "、".join(item.get("brand", "") for item in brands if item.get("brand")) or "未识别",
+        "ocr_text": [item.get("text", "") for item in ocr_items if item.get("text")],
+        "confidence": max([float(item.get("confidence") or 0) for item in detections], default=float(visual_result.get("visual_score") or 0)),
+        "evidence_frame": evidence_frame,
+        "scene_tags": visual_result.get("scene_tags") or [],
+        "risk_level": visual_result.get("risk_level", "none"),
+        "visual_score": visual_result.get("visual_score", 0),
+        "visual_service_result": visual_result,
+        "model_version": visual_result.get("model_version", "vision-tobacco-v0.1.0"),
+    }
+
+
+def yolo_result_to_image_result(yolo_result, evidence_frame):
+    detections = yolo_result.get("detections") or []
+    return {
+        "image_risk_score": float(yolo_result.get("image_risk_score") or 0),
+        "detected_objects": yolo_result.get("detected_objects") or [],
+        "brand": "未识别",
+        "ocr_text": [],
+        "confidence": float(yolo_result.get("confidence") or 0),
+        "evidence_frame": evidence_frame,
+        "detections": detections,
+        "model_id": yolo_result.get("model_id"),
+        "model_name": yolo_result.get("model_name"),
+        "model_version": yolo_result.get("model_version", "Smoking-detection-YOLO26s/best.pt"),
+    }
+
+
+def analyze_image_with_vision(payload):
+    media_path = resolve_media_path(payload.get("image_url"))
+    if not media_path:
+        return analyze_image(payload)
+    content_id = payload.get("content_id") or new_id("IMG")
+    evidence_frame = str(media_path)
+    try:
+        if media_path.suffix.lower() in {".mp4", ".mov", ".avi", ".mkv"} or payload.get("media_type") == "video":
+            visual_result = call_vision_video_service(content_id, media_path, conf=float(payload.get("conf") or 0.35), model_id=payload.get("model_id"))
+        else:
+            visual_result = call_vision_image_service(content_id, media_path, conf=float(payload.get("conf") or 0.35), model_id=payload.get("model_id"))
+        return visual_result_to_image_result(visual_result, evidence_frame)
+    except Exception as exc:
+        try:
+            yolo_result = yolo_detect_image(media_path.read_bytes(), filename=media_path.name, conf=float(payload.get("conf") or 0.5), model_id=payload.get("model_id"))
+            result = yolo_result_to_image_result(yolo_result, evidence_frame)
+            result["vision_fallback_reason"] = str(exc)
+            return result
+        except Exception as inner_exc:
+            result = analyze_image(payload)
+            result["vision_fallback_reason"] = str(exc)
+            result["yolo_fallback_reason"] = str(inner_exc)
+            return result
+
+
 def detector_model_info(model_id, cfg):
     path = cfg["path"]
     return {
@@ -313,6 +777,10 @@ def normalize_detector_model_id(model_id=None):
 
 
 def image_detector_status(selected_model_id=None):
+    try:
+        return vision_service_status(selected_model_id)
+    except Exception as exc:
+        fallback_reason = str(exc)
     deps = {}
     for module in ["ultralytics", "cv2", "torch"]:
         try:
@@ -325,11 +793,55 @@ def image_detector_status(selected_model_id=None):
     current = next(item for item in models if item["id"] == model_id)
     return {
         **current,
+        "service_url": VISION_SERVICE_URL,
+        "service_mode": "local-yolo-fallback",
+        "vision_service_error": fallback_reason,
         "current_model_id": model_id,
         "models": models,
         "dependencies": deps,
         "ready": current["model_exists"] and all(not str(v).startswith("missing:") for v in deps.values()),
     }
+
+
+def visual_result_to_detector_result(visual_result, model_id=None):
+    detections = []
+    for item in visual_result.get("detected_objects") or []:
+        bbox = item.get("bbox") or [0, 0, 0, 0]
+        detections.append({
+            "class_id": item.get("class_id", 0),
+            "class_name": item.get("class_name") or item.get("label_zh") or "unknown",
+            "confidence": float(item.get("confidence") or 0),
+            "box": {
+                "x1": bbox[0] if len(bbox) > 0 else 0,
+                "y1": bbox[1] if len(bbox) > 1 else 0,
+                "x2": bbox[2] if len(bbox) > 2 else 0,
+                "y2": bbox[3] if len(bbox) > 3 else 0,
+            },
+        })
+    evidence = visual_result.get("evidence_frames") or []
+    annotated_image = ""
+    if evidence and isinstance(evidence[0], dict):
+        image_path = evidence[0].get("image_path") or ""
+        annotated_image = "/" + image_path.lstrip("/") if image_path and not image_path.startswith("data:") else image_path
+    return {
+        "detected": bool(detections),
+        "confidence": max([item["confidence"] for item in detections], default=0),
+        "image_risk_score": float(visual_result.get("visual_score") or 0),
+        "detected_objects": [item["class_name"] for item in detections],
+        "detections": detections,
+        "annotated_image": annotated_image,
+        "model_id": model_id or "vision-service",
+        "model_name": "tobacco-vision-risk-service",
+        "model_version": visual_result.get("model_version", "vision-tobacco-v0.1.0"),
+        "service_mode": "vision-service",
+        "visual_service_result": visual_result,
+    }
+
+
+def vision_detect_image(image_bytes, filename="", conf=0.5, model_id=None, imgsz=None):
+    content_id = f"detector_{uuid.uuid4().hex[:12]}"
+    visual_result = call_vision_image_service_bytes(content_id, image_bytes, filename, conf=conf, model_id=model_id)
+    return visual_result_to_detector_result(visual_result, model_id=model_id)
 
 
 def load_yolo_model(model_id=None):
@@ -429,29 +941,41 @@ def fusion_config():
 
 def analyze_fusion(payload):
     cfg = fusion_config()
+    text_score = float(payload.get("text_risk_score") or 0)
+    image_score = float(payload.get("image_risk_score") or 0)
+    audio_score = float(payload.get("audio_risk_score") or 0)
     score = (
-        float(payload.get("text_risk_score") or 0) * cfg["text_weight"]
-        + float(payload.get("image_risk_score") or 0) * cfg["image_weight"]
-        + float(payload.get("audio_risk_score") or 0) * cfg["audio_weight"]
+        text_score * cfg["text_weight"]
+        + image_score * cfg["image_weight"]
+        + audio_score * cfg["audio_weight"]
         + float(payload.get("account_risk_score") or 0) * cfg["account_weight"]
     )
-    if score >= cfg["high_risk_threshold"]:
+    strongest_modality = max(text_score, image_score, audio_score)
+    effective_score = max(score, strongest_modality if strongest_modality >= 0.50 else score)
+    if effective_score >= cfg["high_risk_threshold"]:
         level = "高风险"
-    elif score >= cfg["medium_risk_threshold"]:
+    elif effective_score >= cfg["medium_risk_threshold"]:
         level = "中风险"
-    elif score >= cfg["low_risk_threshold"]:
+    elif effective_score >= cfg["low_risk_threshold"]:
+        level = "低风险"
+    elif strongest_modality >= 0.85:
+        level = "高风险"
+    elif strongest_modality >= 0.70:
+        level = "中风险"
+    elif strongest_modality >= 0.50:
         level = "低风险"
     else:
         level = "无风险"
     violation = []
-    if float(payload.get("image_risk_score") or 0) >= 0.65:
+    if image_score >= 0.65:
         violation.append("图像疑似售烟")
-    if float(payload.get("text_risk_score") or 0) >= 0.65:
+    if text_score >= 0.65:
         violation.append("文本交易引流")
-    if float(payload.get("audio_risk_score") or 0) >= 0.65:
+    if audio_score >= 0.65:
         violation.append("语音交易暗示")
     return {
-        "risk_score": round(score, 2),
+        "risk_score": round(effective_score, 2),
+        "weighted_score": round(score, 2),
         "risk_level": level,
         "violation_type": violation or ["未发现明显违规"],
         "hit_modalities": [name for name, value in [("文本", payload.get("text_risk_score", 0)), ("图像", payload.get("image_risk_score", 0)), ("语音", payload.get("audio_risk_score", 0))] if float(value or 0) >= 0.65],
@@ -467,16 +991,30 @@ def recognize_content(content_id):
         if not content:
             return None
         conn.execute("DELETE FROM recognition_results WHERE content_id=?", (content_id,))
-        text_result = analyze_text({"content_id": content_id, "text": f"{content['title']} {content['raw_text']}"})
+        try:
+            text_result = text_service_analyze_content(content)
+        except Exception as exc:
+            text_result = analyze_text({"content_id": content_id, "text": f"{content['title']} {content['raw_text']}"})
+            text_result["service_mode"] = "local-text-fallback"
+            text_result["text_service_error"] = str(exc)
         image_score = 0
         audio_score = 0
         image_result = None
         audio_result = None
-        if content["media_url"] or content["content_type"] in {"图片", "视频"}:
-            image_result = analyze_image({"content_id": content_id, "image_url": content["media_url"]})
+        media_path = resolve_media_path(content["media_url"])
+        media_ext = media_path.suffix.lower() if media_path else ""
+        is_visual_media = content["content_type"] in {"图片", "视频"} or media_ext in {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".mp4", ".mov", ".avi", ".mkv"}
+        is_audio_media = content["content_type"] in {"音频", "视频"} or media_ext in {".wav", ".mp3", ".m4a", ".aac", ".flac", ".mp4", ".mov", ".avi", ".mkv"}
+        if is_visual_media:
+            image_result = analyze_image_with_vision({"content_id": content_id, "image_url": content["media_url"], "media_type": "video" if content["content_type"] == "视频" else "image"})
             image_score = image_result["image_risk_score"]
-        if content["content_type"] == "视频":
-            audio_result = analyze_audio({"content_id": content_id, "audio_url": content["media_url"]})
+        if is_audio_media and media_path:
+            try:
+                audio_result = audio_service_analyze_media(content, media_path)
+            except Exception as exc:
+                audio_result = analyze_audio({"content_id": content_id, "audio_url": content["media_url"]})
+                audio_result["service_mode"] = "local-audio-fallback"
+                audio_result["audio_service_error"] = str(exc)
             audio_score = audio_result["audio_risk_score"]
         account_score = 0.70 if any(w in content["account_name"] for w in ["同城", "优选", "生活馆"]) else 0.25
         fusion = analyze_fusion({
@@ -514,9 +1052,16 @@ def get_content_detail(content_id):
         results = rows_to_list(conn.execute("SELECT * FROM recognition_results WHERE content_id=? ORDER BY created_at", (content_id,)).fetchall())
         reviews = rows_to_list(conn.execute("SELECT * FROM review_records WHERE content_id=? ORDER BY review_time DESC", (content_id,)).fetchall())
         pushes = rows_to_list(conn.execute("SELECT * FROM push_logs WHERE content_id=? ORDER BY push_time DESC", (content_id,)).fetchall())
+        comments = rows_to_list(conn.execute("SELECT * FROM crawler_comments WHERE content_id=? ORDER BY date, id", (content_id,)).fetchall())
     for item in results:
         item["result"] = json_loads(item.pop("result_json"), {})
-    return {"content": content, "results": results, "reviews": reviews, "push_logs": pushes}
+    for item in comments:
+        item["sender"] = json_loads(item.pop("sender_json"), {})
+        item["raw"] = json_loads(item.pop("raw_payload"), {})
+    content["media_preview_url"] = public_media_url(content.get("media_url", ""))
+    content["author"] = json_loads(content.get("author_json"), {})
+    content["media_list_parsed"] = json_loads(content.get("media_list"), [])
+    return {"content": content, "results": results, "reviews": reviews, "push_logs": pushes, "comments": comments}
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -533,6 +1078,13 @@ class Handler(BaseHTTPRequestHandler):
 
     def send_text(self, text, status=200, content_type="text/plain; charset=utf-8"):
         body = text.encode("utf-8")
+        self.send_response(status)
+        self.send_header("Content-Type", content_type)
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def send_bytes(self, body, status=200, content_type="application/octet-stream"):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
@@ -568,8 +1120,46 @@ class Handler(BaseHTTPRequestHandler):
             "model_id": form_value("model_id", DEFAULT_DETECTOR_MODEL_ID),
         }
 
+    def body_multipart_file(self):
+        form = cgi.FieldStorage(
+            fp=self.rfile,
+            headers=self.headers,
+            environ={
+                "REQUEST_METHOD": "POST",
+                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
+                "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
+            },
+        )
+        upload = form["file"] if "file" in form else None
+        if upload is None or not getattr(upload, "file", None):
+            raise ValueError("缺少 file 文件字段")
+
+        def form_value(name, default=""):
+            return form[name].value if name in form and not getattr(form[name], "filename", None) else default
+
+        return {
+            "file": {
+                "data": upload.file.read(),
+                "filename": upload.filename or "upload.bin",
+            },
+            "content_id": form_value("content_id"),
+            "save_evidence": form_value("save_evidence", "true"),
+        }
+
     def serve_static(self):
         path = urlparse(self.path).path
+        if path.startswith("/media/local/"):
+            parts = path.split("/")
+            token = parts[3] if len(parts) >= 4 else ""
+            file_path = decode_local_media_token(token)
+            if file_path and local_media_allowed(file_path):
+                return self.send_bytes(file_path.read_bytes(), 200, media_content_type(file_path))
+            return self.send_json({"error": "not found"}, 404)
+        if path.startswith("/storage/evidence/"):
+            file_path = ROOT / path.lstrip("/")
+            if file_path.exists() and file_path.is_file() and (ROOT / "storage" / "evidence") in file_path.resolve().parents:
+                return self.send_bytes(file_path.read_bytes(), 200, media_content_type(file_path))
+            return self.send_json({"error": "not found"}, 404)
         file_path = STATIC_DIR / ("index.html" if path in {"/", ""} else path.lstrip("/"))
         if not file_path.exists() or not file_path.is_file() or STATIC_DIR not in file_path.resolve().parents:
             file_path = STATIC_DIR / "index.html"
@@ -599,6 +1189,10 @@ class Handler(BaseHTTPRequestHandler):
                     return self.send_json(rows_to_list(conn.execute("SELECT * FROM model_configs ORDER BY model_type").fetchall()))
             if path == "/api/image-detector/status":
                 return self.send_json(image_detector_status(qs.get("model_id")))
+            if path == "/api/text-service/status":
+                return self.send_json(text_service_status())
+            if path == "/api/audio-service/status":
+                return self.send_json(audio_service_status())
             if path == "/api/fusion-config":
                 return self.send_json(fusion_config())
             if path == "/api/rules":
@@ -616,10 +1210,30 @@ class Handler(BaseHTTPRequestHandler):
         try:
             if path == "/api/image-detector/analyze":
                 payload = self.body_multipart_image()
-                return self.send_json(yolo_detect_image(**payload))
+                try:
+                    return self.send_json(vision_detect_image(**payload))
+                except Exception as exc:
+                    result = yolo_detect_image(**payload)
+                    result["service_mode"] = "local-yolo-fallback"
+                    result["vision_service_error"] = str(exc)
+                    return self.send_json(result)
+            if path in {"/api/audio-service/infer-audio", "/api/audio-service/infer-video-audio"}:
+                payload = self.body_multipart_file()
+                service_path = "/infer/audio" if path.endswith("infer-audio") else "/infer/video-audio"
+                fields = {"save_evidence": payload["save_evidence"]}
+                if payload["content_id"]:
+                    fields["content_id"] = payload["content_id"]
+                return self.send_json(service_post_file(AUDIO_SERVICE_URL, service_path, payload["file"], fields))
             payload = self.body_json()
+            if path == "/api/text-service/infer-text":
+                return self.send_json(merge_business_text_rules(payload, service_post_json(TEXT_SERVICE_URL, "/infer/text", payload)))
+            if path == "/api/text-service/infer-content":
+                return self.send_json(service_post_json(TEXT_SERVICE_URL, "/infer/content", payload))
             if path == "/api/contents":
                 return self.send_json(api_create_content(payload), 201)
+            if path == "/api/crawler/push":
+                result = api_crawler_push(payload)
+                return self.send_json(result, 201 if result.get("success") else 400)
             if m := re.match(r"^/api/contents/([^/]+)/recognize$", path):
                 detail = recognize_content(m.group(1))
                 return self.send_json(detail or {"error": "not found"}, 200 if detail else 404)
@@ -668,6 +1282,7 @@ class Handler(BaseHTTPRequestHandler):
                 with db() as conn:
                     conn.execute("DELETE FROM content_items WHERE id=?", (m.group(1),))
                     conn.execute("DELETE FROM recognition_results WHERE content_id=?", (m.group(1),))
+                    conn.execute("DELETE FROM crawler_comments WHERE content_id=?", (m.group(1),))
                 return self.send_json({"success": True})
             if m := re.match(r"^/api/rules/([^/]+)$", path):
                 with db() as conn:
@@ -720,6 +1335,225 @@ def api_contents(qs):
     sql += " ORDER BY collect_time DESC"
     with db() as conn:
         return rows_to_list(conn.execute(sql, args).fetchall())
+
+
+def content_comment_texts(content_id):
+    with db() as conn:
+        rows = conn.execute(
+            "SELECT content FROM crawler_comments WHERE content_id=? AND content<>'' ORDER BY date, id",
+            (content_id,),
+        ).fetchall()
+    return [row["content"] for row in rows]
+
+
+def first_text(*values):
+    for value in values:
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return ""
+
+
+def ensure_list(value):
+    if value is None:
+        return []
+    if isinstance(value, list):
+        return value
+    return [value]
+
+
+def safe_crawler_id(platform, crawler_type, item_id):
+    raw = first_text(platform, "unknown"), first_text(crawler_type, "content"), first_text(item_id, uuid.uuid4().hex)
+    value = "_".join(raw)
+    return re.sub(r"[^0-9A-Za-z_\-\u4e00-\u9fff]+", "_", value).strip("_")[:120]
+
+
+def crawler_content_type(item, crawler_type):
+    typ = (crawler_type or "").lower()
+    if typ == "video" or item.get("mediaList"):
+        return "视频"
+    if item.get("imageList"):
+        return "图片"
+    if item.get("videoUrl"):
+        return "视频"
+    return "文本"
+
+
+def crawler_media_list(item):
+    if item.get("mediaList") is not None:
+        return [str(v) for v in ensure_list(item.get("mediaList")) if v]
+    if item.get("videoUrl") is not None:
+        return [str(v) for v in ensure_list(item.get("videoUrl")) if v]
+    if item.get("imageList") is not None:
+        return [str(v) for v in ensure_list(item.get("imageList")) if v]
+    return []
+
+
+def crawler_raw_text(item):
+    return first_text(item.get("description"), item.get("content"))
+
+
+def flatten_crawler_comments(comments):
+    flattened = []
+    for comment in ensure_list(comments):
+        if not isinstance(comment, dict):
+            continue
+        flattened.append(("comment", comment))
+        for sub_comment in ensure_list(comment.get("subComments")):
+            if isinstance(sub_comment, dict):
+                flattened.append(("sub_comment", sub_comment))
+    return flattened
+
+
+def upsert_crawler_comments(conn, content_id, comments):
+    seen = set()
+    t = now()
+    for comment_type, comment in flatten_crawler_comments(comments):
+        comment_id = first_text(comment.get("id"))
+        if not comment_id:
+            comment_id = uuid.uuid5(uuid.NAMESPACE_URL, json.dumps(comment, ensure_ascii=False, sort_keys=True)).hex
+        cid = safe_crawler_id(content_id, comment_type, comment_id)
+        seen.add(cid)
+        sender = comment.get("sender") if isinstance(comment.get("sender"), dict) else {}
+        conn.execute(
+            """INSERT INTO crawler_comments
+            (id,content_id,comment_type,parent_comment_id,sender_json,content,date,raw_payload,created_at,updated_at)
+            VALUES (?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(id) DO UPDATE SET
+              content_id=excluded.content_id,
+              comment_type=excluded.comment_type,
+              parent_comment_id=excluded.parent_comment_id,
+              sender_json=excluded.sender_json,
+              content=excluded.content,
+              date=excluded.date,
+              raw_payload=excluded.raw_payload,
+              updated_at=excluded.updated_at""",
+            (
+                cid,
+                content_id,
+                comment_type,
+                first_text(comment.get("parentId")),
+                json.dumps(sender, ensure_ascii=False),
+                first_text(comment.get("content")),
+                first_text(comment.get("date")),
+                json.dumps(comment, ensure_ascii=False),
+                t,
+                t,
+            ),
+        )
+    if seen:
+        placeholders = ",".join("?" for _ in seen)
+        conn.execute(
+            f"DELETE FROM crawler_comments WHERE content_id=? AND id NOT IN ({placeholders})",
+            [content_id, *seen],
+        )
+    else:
+        conn.execute("DELETE FROM crawler_comments WHERE content_id=?", (content_id,))
+
+
+def crawler_item_to_content(platform, crawler_type, item):
+    author = item.get("author") if isinstance(item.get("author"), dict) else {}
+    media = crawler_media_list(item)
+    crawler_id = first_text(item.get("id"))
+    content_id = safe_crawler_id(platform, crawler_type, crawler_id)
+    return {
+        "id": content_id,
+        "platform": first_text(platform, "未知平台"),
+        "content_type": crawler_content_type(item, crawler_type),
+        "title": first_text(item.get("title"), crawler_raw_text(item), "未命名内容"),
+        "account_name": first_text(author.get("nickname"), author.get("id"), "未知账号"),
+        "account_url": first_text(author.get("avatarUrl")),
+        "content_url": first_text(item.get("url")),
+        "raw_text": crawler_raw_text(item),
+        "media_url": media[0] if media else "",
+        "publish_time": first_text(item.get("date")),
+        "crawler_type": first_text(crawler_type),
+        "crawler_id": crawler_id,
+        "author_json": json.dumps(author, ensure_ascii=False),
+        "media_list": json.dumps(media, ensure_ascii=False),
+        "raw_payload": json.dumps(item, ensure_ascii=False),
+    }
+
+
+def api_crawler_push(payload):
+    if not isinstance(payload, dict):
+        return {"error": "payload must be object"}
+    platform = first_text(payload.get("platform"), "未知平台")
+    crawler_type = first_text(payload.get("type"), "content")
+    items = payload.get("data")
+    if not isinstance(items, list):
+        return {"error": "data must be list"}
+    t = now()
+    accepted = []
+    created = 0
+    updated = 0
+    with db() as conn:
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            content = crawler_item_to_content(platform, crawler_type, item)
+            exists = conn.execute("SELECT 1 FROM content_items WHERE id=?", (content["id"],)).fetchone()
+            if exists:
+                conn.execute(
+                    """UPDATE content_items SET
+                      platform=?,content_type=?,title=?,account_name=?,account_url=?,content_url=?,raw_text=?,media_url=?,
+                      publish_time=?,collect_time=?,crawler_type=?,crawler_id=?,author_json=?,media_list=?,raw_payload=?,updated_at=?
+                      WHERE id=?""",
+                    (
+                        content["platform"],
+                        content["content_type"],
+                        content["title"],
+                        content["account_name"],
+                        content["account_url"],
+                        content["content_url"],
+                        content["raw_text"],
+                        content["media_url"],
+                        content["publish_time"] or t,
+                        t,
+                        content["crawler_type"],
+                        content["crawler_id"],
+                        content["author_json"],
+                        content["media_list"],
+                        content["raw_payload"],
+                        t,
+                        content["id"],
+                    ),
+                )
+                updated += 1
+            else:
+                conn.execute(
+                    """INSERT INTO content_items
+                    (id,platform,content_type,title,account_name,account_url,content_url,raw_text,media_url,publish_time,collect_time,
+                     recognize_status,risk_score,risk_level,review_status,crawler_type,crawler_id,author_json,media_list,raw_payload,created_at,updated_at)
+                    VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        content["id"],
+                        content["platform"],
+                        content["content_type"],
+                        content["title"],
+                        content["account_name"],
+                        content["account_url"],
+                        content["content_url"],
+                        content["raw_text"],
+                        content["media_url"],
+                        content["publish_time"] or t,
+                        t,
+                        "pending",
+                        0,
+                        "无风险",
+                        "unreviewed",
+                        content["crawler_type"],
+                        content["crawler_id"],
+                        content["author_json"],
+                        content["media_list"],
+                        content["raw_payload"],
+                        t,
+                        t,
+                    ),
+                )
+                created += 1
+            upsert_crawler_comments(conn, content["id"], item.get("comments"))
+            accepted.append(content["id"])
+    return {"success": True, "accepted": len(accepted), "created": created, "updated": updated, "content_ids": accepted}
 
 
 def api_create_content(payload):

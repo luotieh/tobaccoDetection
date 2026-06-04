@@ -20,6 +20,7 @@ async def infer_image(
     content_id: str | None = Form(None),
     save_evidence: bool = Form(True),
     conf: float | None = Form(None),
+    model_id: str | None = Form(None),
 ):
     try:
         ext = safe_ext(file.filename or "", {"jpg", "jpeg", "png", "webp"})
@@ -32,7 +33,7 @@ async def infer_image(
     upload_path.write_bytes(raw)
     try:
         image = bytes_to_bgr_image(raw)
-        return pipeline.infer_image(image, content_id=content_id, conf=conf, save_evidence=save_evidence)
+        return pipeline.infer_image(image, content_id=content_id, conf=conf, save_evidence=save_evidence, model_id=model_id)
     except Exception as exc:
         raise error("INFERENCE_FAILED", str(exc), 500)
 
@@ -44,6 +45,7 @@ async def infer_video(
     sample_fps: float | None = Form(None),
     max_seconds: int | None = Form(None),
     conf: float | None = Form(None),
+    model_id: str | None = Form(None),
 ):
     try:
         ext = safe_ext(file.filename or "", {"mp4", "mov", "avi", "mkv"})
@@ -55,7 +57,7 @@ async def infer_video(
     upload_path = upload_dir / new_storage_name(content_id, ext)
     upload_path.write_bytes(raw)
     try:
-        return pipeline.infer_video(upload_path, content_id=content_id, sample_fps=sample_fps, max_seconds=max_seconds, conf=conf)
+        return pipeline.infer_video(upload_path, content_id=content_id, sample_fps=sample_fps, max_seconds=max_seconds, conf=conf, model_id=model_id)
     except ValueError as exc:
         if str(exc) == "VIDEO_OPEN_FAILED":
             raise error("VIDEO_OPEN_FAILED", "视频无法打开或格式不受支持")
