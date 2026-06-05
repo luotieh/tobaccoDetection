@@ -23,6 +23,7 @@ ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "demo.db"
+RUNTIME_DIR = ROOT / ".runtime"
 MODEL_REGISTRY = {
     "basant-yolo26s": {
         "name": "basant18/Smoking-detection-YOLO26s",
@@ -1320,14 +1321,19 @@ def api_apply_text_service_config(payload):
     old_pids = listening_pids_on_port(port)
     stopped = stop_processes(old_pids)
     env = text_service_env_from_config(cfg)
+    RUNTIME_DIR.mkdir(exist_ok=True)
+    log_file = RUNTIME_DIR / "text.log"
+    log_handle = log_file.open("ab")
     proc = subprocess.Popen(
         [sys.executable, "-m", "uvicorn", "text_service.main:app", "--host", "0.0.0.0", "--port", str(port)],
         cwd=str(ROOT),
         env=env,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
         start_new_session=True,
     )
+    log_handle.close()
+    (RUNTIME_DIR / "text.pid").write_text(str(proc.pid), encoding="utf-8")
     time.sleep(1.0)
     status = None
     error = ""
