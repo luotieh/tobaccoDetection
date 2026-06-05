@@ -255,12 +255,29 @@ MODELS = [
 
 RULES = [
     ("keyword", "私聊", 0.22, "交易引流词"),
+    ("keyword", "下单", 0.24, "下单交易表达"),
+    ("keyword", "购买", 0.24, "购买交易表达"),
+    ("keyword", "怎么买", 0.24, "购买交易表达"),
+    ("keyword", "怎么卖", 0.24, "售卖交易表达"),
+    ("keyword", "怎卖", 0.22, "售卖交易表达"),
+    ("keyword", "买货", 0.24, "购买交易表达"),
+    ("keyword", "怎么联系", 0.22, "联系方式引导"),
+    ("keyword", "多少钱", 0.22, "询价表达"),
     ("keyword", "有货", 0.24, "现货表达"),
     ("keyword", "到货", 0.20, "到货表达"),
     ("keyword", "一条", 0.24, "计量交易词"),
+    ("keyword", "一盒", 0.22, "计量交易词"),
+    ("keyword", "一箱", 0.22, "计量交易词"),
+    ("keyword", "十盒", 0.20, "计量交易词"),
     ("keyword", "面交", 0.20, "线下交易词"),
     ("keyword", "私信", 0.18, "引流词"),
     ("keyword", "刚到一批", 0.26, "到货交易表达"),
+    ("keyword", "烟管", 0.12, "烟草相关商品词"),
+    ("keyword", "空烟管", 0.16, "烟草相关商品词"),
+    ("keyword", "空心管", 0.16, "烟草相关商品词"),
+    ("keyword", "空管", 0.12, "烟草相关商品词"),
+    ("keyword", "厂家直销", 0.18, "批发售卖表达"),
+    ("keyword", "批发", 0.18, "批量售卖表达"),
     ("blackword", "绿花", 0.22, "黑话示例"),
     ("blackword", "黑金刚", 0.24, "黑话示例"),
     ("blackword", "懂的来", 0.20, "暗示交易"),
@@ -355,7 +372,22 @@ def analyze_text(payload):
     hits = [r for r in rules if r["rule_type"] == "keyword" and r["word"] in text]
     black = [r for r in rules if r["rule_type"] == "blackword" and r["word"] in text]
     brands = [r for r in rules if r["rule_type"] == "brand" and r["word"] in text]
+    hit_words = {r["word"] for r in hits + black + brands}
+    product_words = {"烟管", "空烟管", "空心管", "空管"}
+    inquiry_words = {"多少钱", "下单", "购买", "怎么买", "怎么卖", "怎卖", "买货", "怎么联系"}
+    quantity_words = {"一条", "一盒", "一箱", "十盒"}
+    lead_words = {"私聊", "私信", "有货", "到货", "刚到一批", "面交", "厂家直销", "批发"}
     score = 0.10 + sum(r["risk_weight"] for r in hits + black + brands) + sum(r["risk_weight"] for r in whitelist)
+    if hit_words & product_words and hit_words & (inquiry_words | quantity_words):
+        score = max(score, 0.82)
+    elif hit_words & inquiry_words and hit_words & quantity_words:
+        score = max(score, 0.76)
+    elif hit_words & product_words and hit_words & lead_words:
+        score = max(score, 0.72)
+    elif len((hit_words & inquiry_words) | (hit_words & quantity_words) | (hit_words & lead_words)) >= 2:
+        score = max(score, 0.70)
+    if len(hit_words) >= 4:
+        score = max(score, 0.86)
     score = max(0, min(0.96, score))
     return {
         "text_risk_score": round(score, 2),
@@ -584,22 +616,39 @@ def service_post_file(base_url, path, file_payload, fields=None, timeout=120):
     )
 
 
-def text_service_analyze_content(content):
-    comment_texts = content_comment_texts(content["id"])
-    payload = {
+def build_content_text_payload(content):
+    author = json_loads(content.get("author_json"), {}) or {}
+    return {
         "content_id": content["id"],
         "platform": content["platform"],
         "title": content["title"] or "",
         "description": content["raw_text"] or "",
         "account_name": content["account_name"] or "",
-        "account_bio": (json_loads(content.get("author_json"), {}) or {}).get("description", ""),
-        "comments": comment_texts or ([content["raw_text"]] if content["content_type"] == "评论" and content["raw_text"] else []),
+        "account_bio": author.get("description", ""),
+        "comments": content_comment_texts(content["id"]) or ([content["raw_text"]] if content["content_type"] == "评论" and content["raw_text"] else []),
         "ocr_texts": [],
         "asr_texts": [],
         "content_url": content["content_url"] or "",
     }
+
+
+def text_payload_text(payload):
+    parts = [
+        payload.get("title"),
+        payload.get("description"),
+        payload.get("account_name"),
+        payload.get("account_bio"),
+        *(payload.get("comments") or []),
+        *(payload.get("ocr_texts") or []),
+        *(payload.get("asr_texts") or []),
+    ]
+    return " ".join(str(item).strip() for item in parts if item and str(item).strip())
+
+
+def text_service_analyze_content(content):
+    payload = build_content_text_payload(content)
     result = service_post_json(TEXT_SERVICE_URL, "/infer/content", payload)
-    result = merge_business_text_rules({"text": " ".join([payload["title"], payload["description"], payload["account_name"]])}, result)
+    result = merge_business_text_rules({"text": text_payload_text(payload)}, result)
     result["text_risk_score"] = float(result.get("text_score") or 0)
     result["model_version"] = result.get("model_version", "text-risk-v0.1.0")
     result["service_mode"] = "text-service"
@@ -944,42 +993,57 @@ def analyze_fusion(payload):
     text_score = float(payload.get("text_risk_score") or 0)
     image_score = float(payload.get("image_risk_score") or 0)
     audio_score = float(payload.get("audio_risk_score") or 0)
+    modalities = [
+        ("文本", text_score, bool(payload.get("text_available", True)), "文本交易引流"),
+        ("图像", image_score, bool(payload.get("image_available", image_score > 0)), "图像疑似售烟"),
+        ("语音", audio_score, bool(payload.get("audio_available", audio_score > 0)), "语音交易暗示"),
+    ]
     score = (
         text_score * cfg["text_weight"]
         + image_score * cfg["image_weight"]
         + audio_score * cfg["audio_weight"]
         + float(payload.get("account_risk_score") or 0) * cfg["account_weight"]
     )
-    strongest_modality = max(text_score, image_score, audio_score)
-    effective_score = max(score, strongest_modality if strongest_modality >= 0.50 else score)
-    if effective_score >= cfg["high_risk_threshold"]:
+    available_scores = [value for _, value, available, _ in modalities if available]
+    strongest_modality = max(available_scores, default=0)
+    if strongest_modality >= cfg["high_risk_threshold"]:
+        evidence_level = "高风险"
+    elif strongest_modality >= cfg["medium_risk_threshold"]:
+        evidence_level = "中风险"
+    elif strongest_modality >= cfg["low_risk_threshold"]:
+        evidence_level = "低风险"
+    else:
+        evidence_level = "无风险"
+    effective_score = max(score, strongest_modality)
+    if strongest_modality >= cfg["high_risk_threshold"] or score >= cfg["high_risk_threshold"]:
         level = "高风险"
-    elif effective_score >= cfg["medium_risk_threshold"]:
+    elif strongest_modality >= cfg["medium_risk_threshold"] or score >= cfg["medium_risk_threshold"]:
         level = "中风险"
-    elif effective_score >= cfg["low_risk_threshold"]:
-        level = "低风险"
-    elif strongest_modality >= 0.85:
-        level = "高风险"
-    elif strongest_modality >= 0.70:
-        level = "中风险"
-    elif strongest_modality >= 0.50:
+    elif strongest_modality >= cfg["low_risk_threshold"] or score >= cfg["low_risk_threshold"]:
         level = "低风险"
     else:
         level = "无风险"
-    violation = []
-    if image_score >= 0.65:
-        violation.append("图像疑似售烟")
-    if text_score >= 0.65:
-        violation.append("文本交易引流")
-    if audio_score >= 0.65:
-        violation.append("语音交易暗示")
+    violation = [label for _, value, available, label in modalities if available and value >= cfg["medium_risk_threshold"]]
+    hit_modalities = [name for name, value, available, _ in modalities if available and value >= cfg["medium_risk_threshold"]]
+    missing_modalities = [name for name, _, available, _ in modalities if not available]
+    low_modalities = [name for name, value, available, _ in modalities if available and value > 0 and value < cfg["low_risk_threshold"]]
+    if violation:
+        explanation = "、".join(hit_modalities) + "单模态证据已达到风险阈值，融合结果按强证据优先判定；缺失或低分模态不参与降权。"
+    elif score >= cfg["low_risk_threshold"]:
+        explanation = "多模态弱证据累计达到风险阈值，建议结合上下文复核。"
+    else:
+        explanation = "当前可用模态未触发主要违法售烟特征。"
     return {
         "risk_score": round(effective_score, 2),
         "weighted_score": round(score, 2),
+        "strongest_modality_score": round(strongest_modality, 2),
+        "evidence_level": evidence_level,
         "risk_level": level,
         "violation_type": violation or ["未发现明显违规"],
-        "hit_modalities": [name for name, value in [("文本", payload.get("text_risk_score", 0)), ("图像", payload.get("image_risk_score", 0)), ("语音", payload.get("audio_risk_score", 0))] if float(value or 0) >= 0.65],
-        "model_explanation": "该内容同时出现香烟包装、交易关键词或口播引流表达，综合判断存在违法售烟风险。" if violation else "当前内容未触发主要违法售烟特征。",
+        "hit_modalities": hit_modalities,
+        "missing_modalities": missing_modalities,
+        "low_confidence_modalities": low_modalities,
+        "model_explanation": explanation,
         "review_suggestion": "建议人工复核后推送监管平台。" if level in {"高风险", "中风险"} else "建议归档观察。",
         "model_version": "fusion-risk-v1.0",
     }
@@ -994,7 +1058,7 @@ def recognize_content(content_id):
         try:
             text_result = text_service_analyze_content(content)
         except Exception as exc:
-            text_result = analyze_text({"content_id": content_id, "text": f"{content['title']} {content['raw_text']}"})
+            text_result = analyze_text({"content_id": content_id, "text": text_payload_text(build_content_text_payload(content))})
             text_result["service_mode"] = "local-text-fallback"
             text_result["text_service_error"] = str(exc)
         image_score = 0
@@ -1022,6 +1086,9 @@ def recognize_content(content_id):
             "text_risk_score": text_result["text_risk_score"],
             "image_risk_score": image_score,
             "audio_risk_score": audio_score,
+            "text_available": True,
+            "image_available": image_result is not None,
+            "audio_available": audio_result is not None,
             "account_risk_score": account_score,
         })
         for typ, result, score_key in [
@@ -1340,10 +1407,20 @@ def api_contents(qs):
 def content_comment_texts(content_id):
     with db() as conn:
         rows = conn.execute(
-            "SELECT content FROM crawler_comments WHERE content_id=? AND content<>'' ORDER BY date, id",
+            "SELECT content,sender_json FROM crawler_comments WHERE content_id=? AND content<>'' ORDER BY date, id",
             (content_id,),
         ).fetchall()
-    return [row["content"] for row in rows]
+    texts = []
+    for row in rows:
+        sender = json_loads(row["sender_json"], {}) or {}
+        text = " ".join(
+            str(item).strip()
+            for item in [sender.get("nickname"), sender.get("description"), row["content"]]
+            if item and str(item).strip()
+        )
+        if text:
+            texts.append(text)
+    return texts
 
 
 def first_text(*values):
