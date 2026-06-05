@@ -34,7 +34,14 @@ def score_text(
     if len(risk_categories) >= 2:
         keyword_score = max(keyword_score, 0.95)
 
+    semantic_scores = {item.label: item.score for item in semantics}
     semantic_score = max((item.score for item in semantics if item.label != "normal_discussion"), default=0.0)
+    if (
+        semantic_scores.get("sale_intent", 0.0) >= 0.75
+        and semantic_scores.get("trade_lead", 0.0) >= 0.75
+        and semantic_scores.get("contact_lead", 0.0) >= 0.75
+    ):
+        semantic_score = max(semantic_score, 0.90)
     brand_score = 0.80 if brands else 0.0
     contact_score = 0.90 if any(item.type in {"phone", "qq"} for item in contacts) else 0.75 if contacts else 0.0
     if ("risk_keywords", "contact") in hit_types:
@@ -43,6 +50,9 @@ def score_text(
     whitelist_penalty = 0.20 if any(hit.dictionary == "whitelist_keywords" for hit in hits) else 0.0
     if whitelist_penalty and not keyword_score and not contacts:
         whitelist_penalty = 0.50
+    llm_whitelist = semantic_scores.get("whitelist_context", 0.0) >= 0.80
+    if llm_whitelist and not contacts and keyword_score < 0.60:
+        whitelist_penalty = max(whitelist_penalty, 0.40)
     score = 0.30 * keyword_score + 0.35 * semantic_score + 0.15 * brand_score + 0.10 * contact_score + 0.10 * context_score - whitelist_penalty
     rule_floor = 0.0
     has_trade = "trade" in risk_categories

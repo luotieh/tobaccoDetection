@@ -2,7 +2,11 @@ from text_service.schemas import BrandEntity, KeywordHit, TextEntity
 
 
 def explain(hits: list[KeywordHit], brands: list[BrandEntity], contacts: list[TextEntity], risk_types: list[str]) -> str:
-    if "whitelist_context" in risk_types and len(risk_types) == 1:
+    risk_type_set = set(risk_types)
+    transaction_types = {"sale_intent", "trade_lead", "contact_lead", "price_quantity", "slang_mention"}
+    if {"sale_intent", "trade_lead", "contact_lead"} <= risk_type_set:
+        return "文本存在交易意图、引流暗示和联系方式线索，疑似违法烟草交易。"
+    if "whitelist_context" in risk_type_set and not (risk_type_set & transaction_types):
         return "文本命中控烟、新闻或公益语境，风险降低。"
     categories = {hit.category for hit in hits}
     if contacts and ("trade" in categories or "contact" in categories):

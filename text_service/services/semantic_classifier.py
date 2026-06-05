@@ -16,6 +16,9 @@ LABEL_MAPPING = {
 
 class MockSemanticClassifier:
     mock = True
+    engine = "mock"
+    model_dir = None
+    error = None
 
     def classify(self, hits: list[KeywordHit], contacts: list[TextEntity]) -> list[SemanticResult]:
         dictionaries = {(hit.dictionary, hit.category) for hit in hits}
@@ -48,14 +51,17 @@ class MockSemanticClassifier:
 class TransformersSemanticClassifier:
     def __init__(self):
         self.mock = False
+        self.engine = "transformers"
+        self.model_dir = settings.resolve(settings.model_dir)
+        self.error = None
         self.pipeline = None
         try:
             from transformers import pipeline
 
             self.pipeline = pipeline(
                 "text-classification",
-                model=str(settings.resolve(settings.model_dir)),
-                tokenizer=str(settings.resolve(settings.model_dir)),
+                model=str(self.model_dir),
+                tokenizer=str(self.model_dir),
                 top_k=None,
                 truncation=True,
                 max_length=settings.max_text_length,
@@ -68,9 +74,12 @@ class TransformersSemanticClassifier:
             self.fallback = MockSemanticClassifier()
 
     def classify(self, hits: list[KeywordHit], contacts: list[TextEntity]) -> list[SemanticResult]:
+        return self.classify_text(" ".join(hit.word for hit in hits) or "", hits, contacts)
+
+    def classify_text(self, text: str, hits: list[KeywordHit], contacts: list[TextEntity]) -> list[SemanticResult]:
         if self.mock or self.pipeline is None:
             return self.fallback.classify(hits, contacts)
-        raw = self.pipeline(" ".join(hit.word for hit in hits) or "")
+        raw = self.pipeline(text[: settings.max_text_length] or " ".join(hit.word for hit in hits) or "")
         items = raw[0] if raw and isinstance(raw[0], list) else raw
         return [
             SemanticResult(label=LABEL_MAPPING.get(item["label"], item["label"]), score=round(float(item["score"]), 4))
@@ -80,11 +89,37 @@ class TransformersSemanticClassifier:
 
 class SemanticClassifier:
     def __init__(self):
-        if settings.use_mock_model or not settings.resolve(settings.model_dir).exists():
+        engine = (settings.semantic_engine or "mock").lower()
+        if engine == "llm":
+            from text_service.services.llm_risk_classifier import LlmRiskClassifier
+
+            self.impl = LlmRiskClassifier()
+        elif engine == "transformers":
+            self.impl = TransformersSemanticClassifier()
+        elif engine == "mock":
             self.impl = MockSemanticClassifier()
         else:
-            self.impl = TransformersSemanticClassifier()
+            raise ValueError(f"Unsupported TEXT_SEMANTIC_ENGINE: {settings.semantic_engine}")
         self.mock = self.impl.mock
+        self.engine = getattr(self.impl, "engine", engine)
+        self.model_dir = getattr(self.impl, "model_dir", None)
+        self.provider = getattr(self.impl, "provider", None)
+        self.error = getattr(self.impl, "error", None)
 
-    def classify(self, hits: list[KeywordHit], contacts: list[TextEntity]) -> list[SemanticResult]:
-        return self.impl.classify(hits, contacts)
+    def classify(
+        self,
+        text_or_hits: str | list[KeywordHit],
+        hits: list[KeywordHit] | list[TextEntity] | None = None,
+        contacts: list[TextEntity] | None = None,
+    ) -> list[SemanticResult]:
+        if isinstance(text_or_hits, str):
+            text = text_or_hits
+            keyword_hits = hits if isinstance(hits, list) else []
+            contact_entities = contacts or []
+        else:
+            text = " ".join(hit.word for hit in text_or_hits)
+            keyword_hits = text_or_hits
+            contact_entities = hits if isinstance(hits, list) else []
+        if hasattr(self.impl, "classify_text"):
+            return self.impl.classify_text(text, keyword_hits, contact_entities)
+        return self.impl.classify(keyword_hits, contact_entities)

@@ -2,7 +2,7 @@ const state = { route: "dashboard", data: null };
 
 const menus = [
   ["核心功能", [["dashboard", "工作台"], ["contents", "识别内容列表"], ["image-test", "图像识别测试"], ["text-test", "文本识别测试"], ["audio-test", "语音识别测试"]]],
-  ["配置管理", [["models", "模型配置"], ["fusion", "多模态融合配置"], ["rules", "规则词库"]]],
+  ["配置管理", [["models", "模型配置"], ["text-llm", "LLM 文本配置"], ["fusion", "多模态融合配置"], ["rules", "规则词库"]]],
   ["业务闭环", [["reviews", "审核管理"], ["push", "推送管理"], ["users", "用户角色"]]],
 ];
 
@@ -14,6 +14,7 @@ const titles = {
   "audio-test": ["语音识别测试", "上传音频或视频调用语音风险服务"],
   detail: ["内容详情", "查看三模态识别结果、融合评分和审核动作"],
   models: ["模型配置", "配置文本、图像、语音与融合模型"],
+  "text-llm": ["LLM 文本配置", "配置文本语义识别引擎与本地大模型参数"],
   fusion: ["多模态融合配置", "调整权重和风险等级阈值"],
   rules: ["规则词库", "维护关键词、黑话、品牌词、白名单和地域词"],
   reviews: ["审核管理", "处理中高风险待审核线索"],
@@ -745,6 +746,177 @@ async function saveModel(id) {
   closeModal(); toast("模型配置已保存"); renderModels();
 }
 
+function textServiceStatusPanel(status) {
+  if (!status) {
+    return `<div class="panel"><h3 class="section-title">运行状态 <span class="tag red">不可用</span></h3><p class="pre">无法读取文本服务状态，请确认服务地址和进程。</p></div>`;
+  }
+  const semantic = status.models?.semantic_model || {};
+  const health = status.health || {};
+  return `<div class="panel">
+    <h3 class="section-title">运行状态 <span class="tag ${health.status === "ok" ? "green" : "orange"}">${health.status || "unknown"}</span></h3>
+    <div class="kv">
+      <b>服务地址</b><span>${status.base_url || "-"}</span>
+      <b>当前引擎</b><span>${semantic.engine || "-"}</span>
+      <b>当前来源</b><span>${semantic.provider || (semantic.engine === "mock" ? "旧有文本识别服务" : "-")}</span>
+      <b>Mock 模式</b><span>${semantic.mock ? "是" : "否"}</span>
+      <b>加载错误</b><span>${semantic.error || "-"}</span>
+    </div>
+  </div>`;
+}
+
+async function renderTextLlmConfig() {
+  let config = null;
+  let configError = "";
+  try {
+    config = await api("/api/text-llm-config");
+  } catch (err) {
+    configError = err.message;
+    config = {
+      saved: {
+        semantic_engine: "mock",
+        use_mock_model: 1,
+        transformer_model_dir: "text_models/text-risk-model",
+        llm_provider: "local",
+        llm_model_dir: "text_models/qwen2.5-0.5b-instruct",
+        llm_api_base_url: "",
+        llm_api_key_set: false,
+        llm_api_key_masked: "",
+        llm_api_model: "",
+        llm_max_new_tokens: 256,
+        llm_temperature: 0,
+        llm_timeout_seconds: 10,
+        max_text_length: 512,
+      },
+      runtime_env: {},
+      text_service_url: "",
+    };
+  }
+  let status = null;
+  try {
+    status = await api("/api/text-service/status");
+  } catch (err) {
+    status = null;
+  }
+  const c = config.saved;
+  const savedMode = c.semantic_engine === "llm" && c.llm_provider === "openai_compatible" ? "llm-api" : "legacy";
+  const running = status?.models?.semantic_model || {};
+  const runningMode = running.engine === "llm" && running.provider === "openai_compatible" ? "llm-api" : "legacy";
+  $("#view").innerHTML = `
+    ${configError ? `<div class="panel pre">配置接口暂不可用：${escapeHtml(configError)}。请部署并重启管理端后再切换。</div>` : ""}
+    <div class="panel">
+      <h3 class="section-title">文本识别服务切换</h3>
+      <div class="table-wrap"><table>
+        <thead><tr><th>配置</th><th>用途</th><th>保存状态</th><th>运行状态</th><th>操作</th></tr></thead>
+        <tbody>
+          <tr>
+            <td><b>旧有文本识别服务</b></td>
+            <td>规则词库、实体抽取和现有 mock/规则语义识别。</td>
+            <td>${savedMode === "legacy" ? `<span class="tag green">已保存</span>` : `<span class="tag gray">未选择</span>`}</td>
+            <td>${runningMode === "legacy" ? `<span class="tag green">运行中</span>` : `<span class="tag gray">未运行</span>`}</td>
+            <td><button onclick="switchTextService('legacy')">切换到旧有服务</button></td>
+          </tr>
+          <tr>
+            <td><b>LLM 第三方 API</b></td>
+            <td>
+              <div class="form-grid">
+                <label class="full"><span>API Base URL</span><input id="llm_api_base_url" placeholder="https://api.example.com/v1" value="${c.llm_api_base_url || ""}"></label>
+                <label><span>模型名</span><input id="llm_api_model" placeholder="deepseek-chat" value="${c.llm_api_model || ""}"></label>
+                <label><span>API Key</span><input id="llm_api_key" type="password" autocomplete="off" placeholder="${c.llm_api_key_set ? `已保存：${c.llm_api_key_masked}` : "sk-..."}"></label>
+              </div>
+            </td>
+            <td>${savedMode === "llm-api" ? `<span class="tag green">已保存</span>` : `<span class="tag gray">未选择</span>`}<br>${c.llm_api_key_set ? `<span class="tag green">Key 已保存</span>` : `<span class="tag orange">Key 未保存</span>`}</td>
+            <td>${runningMode === "llm-api" ? `<span class="tag green">运行中</span>` : `<span class="tag gray">未运行</span>`}</td>
+            <td class="actions-cell"><button class="secondary" onclick="checkTextLlmApi()">健康检查</button><button onclick="switchTextService('llm-api')">切换到 LLM API</button></td>
+          </tr>
+        </tbody>
+      </table></div>
+    </div>
+    <div class="grid-2">
+      ${textServiceStatusPanel(status)}
+      <div class="panel"><h3 class="section-title">操作结果</h3><div id="llmActionResult" class="result-box pre">尚未操作</div></div>
+    </div>`;
+}
+
+function textServiceSwitchPayload(mode) {
+  const base = {
+    transformer_model_dir: "text_models/text-risk-model",
+    llm_model_dir: "text_models/qwen2.5-0.5b-instruct",
+    llm_max_new_tokens: 256,
+    llm_temperature: 0,
+    llm_timeout_seconds: 10,
+    max_text_length: 512,
+  };
+  if (mode === "llm-api") {
+    return {
+      ...base,
+      semantic_engine: "llm",
+      use_mock_model: true,
+      llm_provider: "openai_compatible",
+      llm_api_base_url: $("#llm_api_base_url")?.value || "",
+      llm_api_key: $("#llm_api_key")?.value || "",
+      llm_api_model: $("#llm_api_model")?.value || "",
+    };
+  }
+  return {
+    ...base,
+    semantic_engine: "mock",
+    use_mock_model: true,
+    llm_provider: "local",
+    llm_api_base_url: "",
+    llm_api_key: "",
+    llm_api_model: "",
+  };
+}
+
+async function checkTextLlmApi() {
+  const box = $("#llmActionResult");
+  box.textContent = "检查中...";
+  try {
+    const result = await api("/api/text-llm-config/health-check", { method: "POST", body: textServiceSwitchPayload("llm-api") });
+    box.textContent = [
+      `状态：${result.ok ? "正常" : "异常"}`,
+      `说明：${result.message || "-"}`,
+      `Provider：${result.provider || "-"}`,
+      `Endpoint：${result.endpoint || "-"}`,
+      `模型：${result.model || "-"}`,
+      `HTTP：${result.status_code || "-"}`,
+      `延迟：${result.latency_ms != null ? result.latency_ms + "ms" : "-"}`,
+      `API Key 已设置：${result.api_key_present ? "是" : "否"}`,
+      `API Key 来源：${({ page_input: "页面输入", saved_config: "已保存配置", environment: "环境变量" })[result.api_key_source] || "-"}`,
+      `响应摘要：${result.response_preview || "-"}`,
+    ].join("\n");
+  } catch (err) {
+    box.textContent = `检查失败：${err.message}`;
+  }
+}
+
+async function switchTextService(mode) {
+  const box = $("#llmActionResult");
+  box.textContent = "正在保存配置并重启文本服务...";
+  try {
+    const result = await api("/api/text-llm-config/apply-text-service", { method: "POST", body: textServiceSwitchPayload(mode) });
+    const semantic = result.status?.models?.semantic_model || {};
+    box.textContent = [
+      `状态：${result.success ? "已生效" : "待确认"}`,
+      `说明：${result.message || "-"}`,
+      `端口：${result.port || "-"}`,
+      `停止进程：${(result.stopped_pids || []).join(", ") || "-"}`,
+      `启动进程：${result.started_pid || "-"}`,
+      `应用引擎：${result.applied?.semantic_engine || "-"}`,
+      `应用来源：${result.applied?.llm_provider || "-"}`,
+      `API Key 已保存：${result.applied?.llm_api_key_set ? "是" : "否"}`,
+      `运行引擎：${semantic.engine || "-"}`,
+      `运行来源：${semantic.provider || "-"}`,
+      `Mock 模式：${semantic.mock ? "是" : "否"}`,
+      `错误：${result.error || semantic.error || "-"}`,
+    ].join("\n");
+    toast(result.success ? "文本服务已切换" : "文本服务切换待确认");
+    setTimeout(renderTextLlmConfig, 800);
+  } catch (err) {
+    box.textContent = `切换失败：${err.message}`;
+  }
+}
+
 async function renderFusion() {
   const c = await api("/api/fusion-config");
   const fields = ["text_weight", "image_weight", "audio_weight", "account_weight", "high_risk_threshold", "medium_risk_threshold", "low_risk_threshold"];
@@ -834,6 +1006,7 @@ async function renderApp() {
     else if (route === "audio-test") await renderAudioTest();
     else if (route === "detail") await renderDetail(id);
     else if (route === "models") await renderModels();
+    else if (route === "text-llm") await renderTextLlmConfig();
     else if (route === "fusion") await renderFusion();
     else if (route === "rules") await renderRules();
     else if (route === "reviews") await renderReviews();
