@@ -47,6 +47,14 @@ def test_llm_chat_completions_url_accepts_base_or_full_path():
     assert LlmRiskClassifier.chat_completions_url("https://api.example.com/v1/chat/completions") == "https://api.example.com/v1/chat/completions"
 
 
+def test_llm_prompt_includes_rule_dictionary_context():
+    prompt = LlmRiskClassifier().build_prompt("刚到一批，私聊", [], [])
+
+    assert "规则词库摘要" in prompt
+    assert "risk_keywords" in prompt
+    assert "刚到一批" in prompt
+
+
 def test_llm_classifier_reads_openai_compatible_api(monkeypatch):
     monkeypatch.setattr(settings, "llm_provider", "openai_compatible")
     monkeypatch.setattr(settings, "llm_api_base_url", "https://api.example.com/v1")

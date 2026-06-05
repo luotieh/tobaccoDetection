@@ -360,3 +360,35 @@ def test_listening_pids_on_port_parses_ss_output(monkeypatch):
     monkeypatch.setattr(management.os, "getpid", lambda: 999)
 
     assert management.listening_pids_on_port(8010) == [123]
+
+
+def test_parse_rule_upload_supports_txt_csv_and_json():
+    management = load_management_app()
+
+    txt = management.parse_rule_upload({"filename": "rules.txt", "data": "新词\n#备注\n另一个词\n".encode()}, "blackword")
+    csv_rows = management.parse_rule_upload({"filename": "rules.csv", "data": "word,rule_type,risk_weight,remark\n导入词,brand,0.3,品牌\n".encode()}, "keyword")
+    json_rows = management.parse_rule_upload({"filename": "rules.json", "data": '{"whitelist":["公益控烟"]}'.encode()}, "keyword")
+
+    assert [(item["rule_type"], item["word"]) for item in txt] == [("blackword", "新词"), ("blackword", "另一个词")]
+    assert csv_rows[0]["rule_type"] == "brand"
+    assert csv_rows[0]["risk_weight"] == 0.3
+    assert json_rows[0]["rule_type"] == "whitelist"
+    assert json_rows[0]["word"] == "公益控烟"
+
+
+def test_import_rules_skips_duplicates(tmp_path, monkeypatch):
+    management = load_management_app()
+    monkeypatch.setattr(management, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(management, "DB_PATH", tmp_path / "demo.db")
+    monkeypatch.setattr(management, "ROOT", tmp_path)
+    (tmp_path / "text_service" / "data").mkdir(parents=True)
+    management.init_db()
+
+    first = management.api_import_rules({"filename": "rules.txt", "data": "导入测试词\n".encode()}, "keyword")
+    second = management.api_import_rules({"filename": "rules.txt", "data": "导入测试词\n".encode()}, "keyword")
+
+    assert first["inserted"] == 1
+    assert second["inserted"] == 0
+    assert second["skipped"] == 1
+    synced = (tmp_path / "text_service" / "data" / "management_rule_keywords.json").read_text(encoding="utf-8")
+    assert "导入测试词" in synced

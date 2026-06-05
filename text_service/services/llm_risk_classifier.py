@@ -84,10 +84,31 @@ class LlmRiskClassifier:
             "重点识别隐晦售烟、交易引流、联系方式暗示、价格数量、品牌提及、黑话表达。\n"
             f"允许标签：{labels}\n"
             "输出格式：{\"labels\":[{\"label\":\"sale_intent\",\"score\":0.82}],\"reason\":\"一句话原因\",\"confidence\":0.76}\n"
+            f"规则词库摘要：{self.rule_context()}\n"
             f"文本：{text[:settings.max_text_length]}\n"
             f"规则命中：{json.dumps(hit_items, ensure_ascii=False)}\n"
             f"联系方式实体：{json.dumps(contact_items, ensure_ascii=False)}\n"
         )
+
+    @staticmethod
+    def rule_context() -> str:
+        try:
+            from text_service.services.dictionary_matcher import DictionaryMatcher
+
+            raw = DictionaryMatcher().raw()
+        except Exception:
+            return "{}"
+        summary = {}
+        for dictionary, groups in raw.items():
+            summary[dictionary] = {}
+            for category, words in groups.items():
+                if isinstance(words, list):
+                    summary[dictionary][category] = [str(word) for word in words[:30]]
+                elif isinstance(words, dict):
+                    summary[dictionary][category] = list(words.keys())[:30]
+                else:
+                    summary[dictionary][category] = [str(words)]
+        return json.dumps(summary, ensure_ascii=False)
 
     def generate(self, prompt: str) -> str:
         if self.provider != "local":

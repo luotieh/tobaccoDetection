@@ -932,7 +932,12 @@ async function saveFusion() {
 
 async function renderRules() {
   const rows = await api("/api/rules");
-  $("#view").innerHTML = `<div class="toolbar"><div><label><span>词库类型</span><select id="ruleFilter"><option value="">全部</option><option value="keyword">关键词</option><option value="blackword">黑话</option><option value="brand">品牌词</option><option value="whitelist">白名单</option><option value="region">地域词</option></select></label></div><div class="actions"><button onclick="filterRules()">查询</button><button class="secondary" onclick="openRuleForm()">新增词条</button></div></div><div class="table-wrap">${rulesTable(rows)}</div>`;
+  $("#view").innerHTML = `<div class="toolbar"><div><label><span>词库类型</span><select id="ruleFilter"><option value="">全部</option><option value="keyword">关键词</option><option value="blackword">黑话</option><option value="brand">品牌词</option><option value="whitelist">白名单</option><option value="region">地域词</option></select></label></div><div class="actions"><button onclick="filterRules()">查询</button><button class="secondary" onclick="openRuleForm()">新增词条</button></div></div>
+    <div class="panel"><h3 class="section-title">上传文件导入</h3><div class="form-grid">
+      <label><span>导入类型</span><select id="ruleImportType"><option value="keyword">关键词</option><option value="blackword">黑话</option><option value="brand">品牌词</option><option value="whitelist">白名单</option><option value="region">地域词</option></select></label>
+      <label class="full"><span>规则文件</span><input id="ruleImportFile" type="file" accept=".txt,.csv,.json"></label>
+    </div><div class="dialog-actions"><button class="secondary" onclick="importRulesFile()">上传并识别规则</button></div><div id="ruleImportResult" class="result-box pre">支持 txt 每行一个词，csv 字段 rule_type,word,risk_weight,remark,enabled，json 数组或对象分组。</div></div>
+    <div class="table-wrap">${rulesTable(rows)}</div>`;
 }
 
 function rulesTable(rows) {
@@ -967,6 +972,26 @@ async function deleteRule(id) {
   if (!confirm("确认删除词条？")) return;
   await api(`/api/rules/${id}`, { method: "DELETE" });
   toast("词条已删除"); renderRules();
+}
+
+async function importRulesFile() {
+  const file = $("#ruleImportFile").files[0];
+  if (!file) {
+    toast("请选择规则文件");
+    return;
+  }
+  const form = new FormData();
+  form.append("file", file);
+  form.append("rule_type", $("#ruleImportType").value || "keyword");
+  $("#ruleImportResult").textContent = "导入中...";
+  try {
+    const result = await apiForm("/api/rules/import", form);
+    $("#ruleImportResult").textContent = `解析：${result.parsed}\n新增：${result.inserted}\n跳过重复：${result.skipped}`;
+    toast("规则文件导入完成");
+    filterRules();
+  } catch (err) {
+    $("#ruleImportResult").textContent = `导入失败：${err.message}`;
+  }
 }
 
 async function renderReviews() {

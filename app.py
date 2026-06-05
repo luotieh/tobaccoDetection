@@ -1,7 +1,9 @@
 #!/usr/bin/env python3
 import base64
 import cgi
+import csv
 import http.client
+import io
 import json
 import os
 import random
@@ -1581,6 +1583,7 @@ class Handler(BaseHTTPRequestHandler):
                 "filename": upload.filename or "upload.bin",
             },
             "content_id": form_value("content_id"),
+            "rule_type": form_value("rule_type", "keyword"),
             "save_evidence": form_value("save_evidence", "true"),
         }
 
@@ -1664,6 +1667,9 @@ class Handler(BaseHTTPRequestHandler):
                 if payload["content_id"]:
                     fields["content_id"] = payload["content_id"]
                 return self.send_json(service_post_file(AUDIO_SERVICE_URL, service_path, payload["file"], fields))
+            if path == "/api/rules/import":
+                payload = self.body_multipart_file()
+                return self.send_json(api_import_rules(payload["file"], payload.get("rule_type") or "keyword"), 201)
             payload = self.body_json()
             if path == "/api/text-service/infer-text":
                 return self.send_json(merge_business_text_rules(payload, service_post_json(TEXT_SERVICE_URL, "/infer/text", payload)))
@@ -1733,6 +1739,7 @@ class Handler(BaseHTTPRequestHandler):
             if m := re.match(r"^/api/rules/([^/]+)$", path):
                 with db() as conn:
                     conn.execute("DELETE FROM rule_words WHERE id=?", (m.group(1),))
+                sync_rules_to_text_dictionaries()
                 return self.send_json({"success": True})
             return self.send_json({"error": "not found"}, 404)
         except Exception as exc:
@@ -2067,6 +2074,24 @@ def api_rules(qs):
         return rows_to_list(conn.execute(sql, args).fetchall())
 
 
+def sync_rules_to_text_dictionaries():
+    data_dir = ROOT / "text_service" / "data"
+    if not data_dir.exists():
+        return
+    with db() as conn:
+        rows = rows_to_list(conn.execute("SELECT * FROM rule_words WHERE enabled=1").fetchall())
+    imports = {"keyword": [], "blackword": [], "brand": [], "whitelist": [], "region": []}
+    for row in rows:
+        word = str(row.get("word") or "").strip()
+        if not word:
+            continue
+        typ = row.get("rule_type")
+        if typ in imports:
+            imports[typ].append(word)
+    payload = {key: sorted(set(words)) for key, words in imports.items() if words}
+    (data_dir / "management_rule_keywords.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def api_create_rule(payload):
     rid = new_id("RW")
     with db() as conn:
@@ -2074,7 +2099,101 @@ def api_create_rule(payload):
             "INSERT INTO rule_words VALUES (?,?,?,?,?,?,?)",
             (rid, payload.get("rule_type", "keyword"), payload.get("word", ""), float(payload.get("risk_weight", 0.1)), int(payload.get("enabled", 1)), payload.get("remark", ""), now()),
         )
-        return row_to_dict(conn.execute("SELECT * FROM rule_words WHERE id=?", (rid,)).fetchone())
+        row = row_to_dict(conn.execute("SELECT * FROM rule_words WHERE id=?", (rid,)).fetchone())
+    sync_rules_to_text_dictionaries()
+    return row
+
+
+def normalize_rule_type(value):
+    value = str(value or "keyword").strip()
+    aliases = {
+        "关键词": "keyword",
+        "黑话": "blackword",
+        "品牌": "brand",
+        "品牌词": "brand",
+        "白名单": "whitelist",
+        "地域": "region",
+        "地域词": "region",
+    }
+    return aliases.get(value, value if value in {"keyword", "blackword", "brand", "whitelist", "region"} else "keyword")
+
+
+def parse_rule_upload(file_payload, default_rule_type="keyword"):
+    filename = file_payload.get("filename") or ""
+    text = file_payload.get("data", b"").decode("utf-8-sig", errors="ignore")
+    suffix = Path(filename).suffix.lower()
+    rows = []
+    if suffix == ".json":
+        data = json.loads(text or "[]")
+        if isinstance(data, list):
+            source_rows = data
+        elif isinstance(data, dict):
+            source_rows = []
+            for typ, value in data.items():
+                if isinstance(value, dict):
+                    for category, words in value.items():
+                        for word in words if isinstance(words, list) else [words]:
+                            source_rows.append({"rule_type": typ, "word": word, "remark": str(category)})
+                else:
+                    for word in value if isinstance(value, list) else [value]:
+                        source_rows.append({"rule_type": typ, "word": word})
+        else:
+            source_rows = []
+        for item in source_rows:
+            if isinstance(item, str):
+                rows.append({"rule_type": default_rule_type, "word": item})
+            elif isinstance(item, dict):
+                rows.append(item)
+    elif suffix == ".csv":
+        csv_rows = list(csv.reader(io.StringIO(text)))
+        if csv_rows:
+            header = [item.strip() for item in csv_rows[0]]
+            has_header = bool({"word", "词条", "rule_type", "类型"} & set(header))
+            if has_header:
+                rows.extend(csv.DictReader(io.StringIO(text)))
+            else:
+                for parts in csv_rows:
+                    if parts and parts[0].strip():
+                        rows.append({"word": parts[0].strip(), "rule_type": default_rule_type})
+    else:
+        for line in text.splitlines():
+            word = line.strip()
+            if word and not word.startswith("#"):
+                rows.append({"rule_type": default_rule_type, "word": word})
+    parsed = []
+    for item in rows:
+        word = str(item.get("word") or item.get("词条") or "").strip()
+        if not word:
+            continue
+        parsed.append(
+            {
+                "rule_type": normalize_rule_type(item.get("rule_type") or item.get("类型") or default_rule_type),
+                "word": word,
+                "risk_weight": float(item.get("risk_weight") or item.get("权重") or 0.1),
+                "enabled": int(item.get("enabled") if item.get("enabled") is not None else item.get("启用") if item.get("启用") is not None else 1),
+                "remark": str(item.get("remark") or item.get("备注") or "文件导入").strip(),
+            }
+        )
+    return parsed
+
+
+def api_import_rules(file_payload, default_rule_type="keyword"):
+    items = parse_rule_upload(file_payload, default_rule_type)
+    inserted = 0
+    skipped = 0
+    with db() as conn:
+        for item in items:
+            exists = conn.execute("SELECT 1 FROM rule_words WHERE rule_type=? AND word=?", (item["rule_type"], item["word"])).fetchone()
+            if exists:
+                skipped += 1
+                continue
+            conn.execute(
+                "INSERT INTO rule_words VALUES (?,?,?,?,?,?,?)",
+                (new_id("RW"), item["rule_type"], item["word"], item["risk_weight"], item["enabled"], item["remark"], now()),
+            )
+            inserted += 1
+    sync_rules_to_text_dictionaries()
+    return {"success": True, "inserted": inserted, "skipped": skipped, "parsed": len(items)}
 
 
 def api_update_rule(rule_id, payload):
@@ -2084,7 +2203,9 @@ def api_update_rule(rule_id, payload):
     args.append(rule_id)
     with db() as conn:
         conn.execute(f"UPDATE rule_words SET {','.join(sets)} WHERE id=?", args)
-        return row_to_dict(conn.execute("SELECT * FROM rule_words WHERE id=?", (rule_id,)).fetchone())
+        row = row_to_dict(conn.execute("SELECT * FROM rule_words WHERE id=?", (rule_id,)).fetchone())
+    sync_rules_to_text_dictionaries()
+    return row
 
 
 def api_reviews(qs):
