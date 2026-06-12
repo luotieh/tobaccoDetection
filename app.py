@@ -2369,6 +2369,8 @@ def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Demo server running: http://127.0.0.1:{port}")
+    # 启动即扫描历史未识别(pending)数据，后台线程依次自动识别
+    trigger_auto_recognize()
     server.serve_forever()
 
 
