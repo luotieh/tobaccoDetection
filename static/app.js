@@ -375,7 +375,7 @@ function contentsTable(rows) {
   return `<table>
     <thead><tr><th>编号</th><th>平台</th><th>类型</th><th>标题</th><th>账号</th><th>采集时间</th><th>识别</th><th>风险</th><th>审核</th><th>操作</th></tr></thead>
     <tbody>${rows.map(r => `<tr>
-      <td>${r.id}</td><td>${r.platform}</td><td>${r.content_type}</td><td>${r.title}</td><td>${r.account_name}</td><td>${r.collect_time}</td>
+      <td>${r.id}</td><td>${r.platform}</td><td>${r.content_type}</td><td class="title-cell" title="${escapeHtml(r.title || "")}">${escapeHtml(r.title || "")}</td><td>${r.account_name}</td><td>${r.collect_time}</td>
       <td>${statusTag(r.recognize_status)}</td><td>${riskTag(r.risk_level)} ${Number(r.risk_score || 0).toFixed(2)}</td><td>${statusTag(r.review_status)}</td>
       <td class="actions-cell">
         <button class="secondary" onclick="setRoute('detail/${r.id}')">查看</button>
