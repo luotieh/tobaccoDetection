@@ -20,7 +20,7 @@
 
 ## 运行要求
 
-- Python 3.10+
+- Python 3.10+（已兼容至 3.13，不再依赖 3.13 移除的 `cgi` 模块）
 - 图像识别依赖 `ultralytics`、`opencv-python`
 - 文本/语音服务依赖 `fastapi`、`uvicorn`、`python-multipart`；语音真实媒体处理建议安装 FFmpeg。
 
