@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import base64
-import cgi
 import csv
 import http.client
 import io
@@ -16,6 +15,7 @@ import tempfile
 import time
 import uuid
 from datetime import datetime, timedelta
+from email.message import Message as EmailMessage
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -1504,6 +1504,56 @@ def get_content_detail(content_id):
     return {"content": content, "results": results, "reviews": reviews, "push_logs": pushes, "comments": comments}
 
 
+def parse_multipart_form(body, content_type):
+    """解析 multipart/form-data，替代 Python 3.13 已移除的 cgi 模块。
+
+    返回 (fields, files)：
+      fields: {name: str}              普通文本字段
+      files:  {name: {"filename", "data"}}  文件字段（data 为原始字节）
+
+    仅用 email 模块解析文本头部，二进制内容直接从字节切片，避免编码损坏。
+    """
+    type_header = EmailMessage()
+    type_header["content-type"] = content_type or ""
+    boundary = type_header.get_param("boundary")
+    if not boundary:
+        raise ValueError("缺少 multipart 边界(boundary)")
+    if isinstance(boundary, tuple):  # RFC 2231 编码形式
+        boundary = boundary[2]
+    delimiter = b"--" + boundary.encode("latin-1")
+
+    fields = {}
+    files = {}
+    for segment in body.split(delimiter):
+        if not segment or segment in (b"\r\n", b"--\r\n", b"--"):
+            continue
+        if segment.startswith(b"--"):  # 结束边界，忽略尾部
+            break
+        if segment.startswith(b"\r\n"):
+            segment = segment[2:]
+        if segment.endswith(b"\r\n"):
+            segment = segment[:-2]
+        header_blob, sep, content = segment.partition(b"\r\n\r\n")
+        if not sep:
+            continue
+        part = EmailMessage()
+        for line in header_blob.split(b"\r\n"):
+            if b":" in line:
+                key, _, val = line.decode("latin-1").partition(":")
+                part[key.strip()] = val.strip()
+        name = part.get_param("name", header="content-disposition")
+        if name is None:
+            continue
+        if isinstance(name, tuple):
+            name = name[2]
+        filename = part.get_filename()
+        if filename is not None:
+            files[name] = {"filename": filename, "data": content}
+        else:
+            fields[name] = content.decode("utf-8", "replace")
+    return fields, files
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         sys.stderr.write("%s - %s\n" % (self.address_string(), fmt % args))
@@ -1537,54 +1587,37 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
+    def read_multipart_form(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length > 0 else b""
+        return parse_multipart_form(body, self.headers.get("Content-Type", ""))
+
     def body_multipart_image(self):
-        form = cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={
-                "REQUEST_METHOD": "POST",
-                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
-            },
-        )
-        image = form["image"] if "image" in form else None
-        if image is None or not getattr(image, "file", None):
+        fields, files = self.read_multipart_form()
+        image = files.get("image")
+        if not image:
             raise ValueError("缺少 image 文件字段")
-        def form_value(name, default):
-            return form[name].value if name in form and not getattr(form[name], "filename", None) else default
         return {
-            "image_bytes": image.file.read(),
-            "filename": image.filename or "upload.jpg",
-            "conf": float(form_value("conf", 0.5)),
-            "imgsz": int(form_value("imgsz", 800)),
-            "model_id": form_value("model_id", DEFAULT_DETECTOR_MODEL_ID),
+            "image_bytes": image["data"],
+            "filename": image["filename"] or "upload.jpg",
+            "conf": float(fields.get("conf", 0.5)),
+            "imgsz": int(fields.get("imgsz", 800)),
+            "model_id": fields.get("model_id", DEFAULT_DETECTOR_MODEL_ID),
         }
 
     def body_multipart_file(self):
-        form = cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={
-                "REQUEST_METHOD": "POST",
-                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
-            },
-        )
-        upload = form["file"] if "file" in form else None
-        if upload is None or not getattr(upload, "file", None):
+        fields, files = self.read_multipart_form()
+        upload = files.get("file")
+        if not upload:
             raise ValueError("缺少 file 文件字段")
-
-        def form_value(name, default=""):
-            return form[name].value if name in form and not getattr(form[name], "filename", None) else default
-
         return {
             "file": {
-                "data": upload.file.read(),
-                "filename": upload.filename or "upload.bin",
+                "data": upload["data"],
+                "filename": upload["filename"] or "upload.bin",
             },
-            "content_id": form_value("content_id"),
-            "rule_type": form_value("rule_type", "keyword"),
-            "save_evidence": form_value("save_evidence", "true"),
+            "content_id": fields.get("content_id", ""),
+            "rule_type": fields.get("rule_type", "keyword"),
+            "save_evidence": fields.get("save_evidence", "true"),
         }
 
     def serve_static(self):
