@@ -12,6 +12,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from datetime import datetime, timedelta
@@ -46,6 +47,7 @@ DEFAULT_DETECTOR_MODEL_ID = os.environ.get("SMOKING_DETECTOR_MODEL", "basant-yol
 VISION_SERVICE_URL = os.environ.get("VISION_SERVICE_URL", "http://127.0.0.1:9000")
 TEXT_SERVICE_URL = os.environ.get("TEXT_SERVICE_URL", "http://127.0.0.1:8010")
 AUDIO_SERVICE_URL = os.environ.get("AUDIO_SERVICE_URL", "http://127.0.0.1:8020")
+AUTO_RECOGNIZE = os.environ.get("AUTO_RECOGNIZE", "true").strip().lower() not in {"0", "false", "no", "off"}
 _YOLO_MODELS = {}
 
 
@@ -1484,6 +1486,63 @@ def recognize_content(content_id):
     return get_content_detail(content_id)
 
 
+_auto_recognize_event = threading.Event()
+_auto_recognize_thread = None
+_auto_recognize_thread_lock = threading.Lock()
+
+
+def next_pending_content_id():
+    """取下一条待识别内容：新内容(created_at 最新)优先，再回溯历史未识别数据。"""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT id FROM content_items WHERE recognize_status='pending' "
+            "ORDER BY created_at DESC, id DESC LIMIT 1"
+        ).fetchone()
+    return row["id"] if row else None
+
+
+def drain_pending_recognition():
+    """顺序识别所有待识别(pending)内容，直到队列清空。"""
+    while True:
+        content_id = next_pending_content_id()
+        if not content_id:
+            break
+        try:
+            recognize_content(content_id)
+        except Exception as exc:
+            # 单条失败不能阻塞队列；标记 failed 避免无限重复处理
+            sys.stderr.write("[auto-recognize] %s 识别失败: %s\n" % (content_id, exc))
+            try:
+                with db() as conn:
+                    conn.execute(
+                        "UPDATE content_items SET recognize_status='failed', updated_at=? WHERE id=?",
+                        (now(), content_id),
+                    )
+            except Exception:
+                pass
+
+
+def _auto_recognize_loop():
+    while True:
+        _auto_recognize_event.wait()
+        _auto_recognize_event.clear()
+        drain_pending_recognition()
+
+
+def trigger_auto_recognize():
+    """触发后台顺序识别：自动识别新内容，并依次清空历史未识别(pending)队列。"""
+    if not AUTO_RECOGNIZE:
+        return
+    global _auto_recognize_thread
+    with _auto_recognize_thread_lock:
+        if _auto_recognize_thread is None or not _auto_recognize_thread.is_alive():
+            _auto_recognize_thread = threading.Thread(
+                target=_auto_recognize_loop, name="auto-recognize", daemon=True
+            )
+            _auto_recognize_thread.start()
+    _auto_recognize_event.set()
+
+
 def get_content_detail(content_id):
     with db() as conn:
         content = row_to_dict(conn.execute("SELECT * FROM content_items WHERE id=?", (content_id,)).fetchone())
@@ -1713,9 +1772,13 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/text-llm-config/apply-text-service":
                 return self.send_json(api_apply_text_service_config(payload))
             if path == "/api/contents":
-                return self.send_json(api_create_content(payload), 201)
+                content = api_create_content(payload)
+                trigger_auto_recognize()
+                return self.send_json(content, 201)
             if path == "/api/crawler/push":
                 result = api_crawler_push(payload)
+                if result.get("created"):
+                    trigger_auto_recognize()
                 return self.send_json(result, 201 if result.get("success") else 400)
             if m := re.match(r"^/api/contents/([^/]+)/recognize$", path):
                 detail = recognize_content(m.group(1))
