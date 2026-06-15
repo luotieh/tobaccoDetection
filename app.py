@@ -61,6 +61,8 @@ CRAWLER_RISK_API_PATH = os.environ.get("CRAWLER_RISK_API_PATH", "/api/internal/u
 # 评论区用户判定为高风险的分数阈值。评论是比整帖更低的判定门槛：
 # 售卖帖下的购买/交易/价格询问(怎么下单/多少钱/批发)即应上报，默认 0.65(中风险及以上)
 COMMENT_HIGH_RISK_THRESHOLD = float(os.environ.get("COMMENT_HIGH_RISK_THRESHOLD", "0.65"))
+# 自动化审核反馈：识别为高风险的内容在识别完成后自动把风险账户反馈爬虫端，无需人工确认
+AUTO_FEEDBACK_ON_RECOGNIZE = os.environ.get("AUTO_FEEDBACK_ON_RECOGNIZE", "true").strip().lower() not in {"0", "false", "no", "off"}
 # 单条内容识别阶段最多给多少条评论打分（防止超大评论区拖垮识别队列）
 COMMENT_SCORE_MAX = int(os.environ.get("COMMENT_SCORE_MAX", "100"))
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "200"))
@@ -1555,8 +1557,14 @@ def recognize_content(content_id):
     # 评论区结合帖子上下文逐条打分（仍在识别阶段，不占用数据库连接）
     comment_scores = score_content_comments(content)
     # 3) 写入阶段：仅短写事务（删旧结果+写结果+更新内容+落库评论分），写锁占用极短
-    review_status = "pending" if fusion["risk_level"] in {"高风险", "中风险"} else "unreviewed"
     with db() as conn:
+        # 保护：识别期间若已有人工审核结论，则不覆盖（事务内重读，兼顾边识别边审核）
+        current = conn.execute("SELECT review_status FROM content_items WHERE id=?", (content_id,)).fetchone()
+        prev_review = current["review_status"] if current else None
+        if prev_review in REVIEWED_STATUSES:
+            review_status = prev_review
+        else:
+            review_status = "pending" if fusion["risk_level"] in {"高风险", "中风险"} else "unreviewed"
         conn.execute("DELETE FROM recognition_results WHERE content_id=?", (content_id,))
         for comment_db_id, (c_score, c_level) in comment_scores.items():
             conn.execute(
@@ -1579,6 +1587,15 @@ def recognize_content(content_id):
             "UPDATE content_items SET recognize_status='completed', risk_score=?, risk_level=?, review_status=?, updated_at=? WHERE id=?",
             (fusion["risk_score"], fusion["risk_level"], review_status, now(), content_id),
         )
+    # 自动化审核反馈：高风险内容识别完成后自动反馈风险账户(发帖人+评论区高风险用户)到爬虫端
+    if AUTO_FEEDBACK_ON_RECOGNIZE and fusion["risk_level"] == "高风险":
+        content["risk_score"] = fusion["risk_score"]
+        content["risk_level"] = fusion["risk_level"]
+        try:
+            feedback_high_risk_account(content)
+            feedback_high_risk_comment_users(content)
+        except Exception as exc:
+            sys.stderr.write("[auto-feedback] %s 自动反馈失败: %s\n" % (content_id, exc))
     return get_content_detail(content_id)
 
 
