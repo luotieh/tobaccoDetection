@@ -208,6 +208,7 @@ td { color: #26364d; }
   backdrop-filter: blur(18px) saturate(155%);
   -webkit-backdrop-filter: blur(18px) saturate(155%);
 }
+.title-cell { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .actions-cell { display: flex; gap: 7px; flex-wrap: wrap; min-width: 180px; }
 .tag { display: inline-flex; align-items: center; border-radius: 4px; padding: 3px 8px; font-size: 12px; border: 1px solid transparent; white-space: nowrap; }
 .tag.red { color: var(--red); background: rgba(255,240,240,.76); border-color: rgba(183,45,45,.20); }

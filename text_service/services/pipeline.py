@@ -1,4 +1,5 @@
 import json
+from pathlib import Path
 
 from text_service.config import settings
 from text_service.schemas import ContentInferRequest, ContentInferResult, EvidenceText, FieldResult, TextInferResult
@@ -18,8 +19,19 @@ class TextRiskPipeline:
         self.classifier = SemanticClassifier()
 
     def info(self) -> dict:
+        model_dir = self.classifier.model_dir or settings.resolve(settings.model_dir)
+        semantic_model = {
+            "enabled": True,
+            "engine": self.classifier.engine,
+            "provider": self.classifier.provider,
+            "mock": self.classifier.mock,
+            "model_dir": str(model_dir),
+            "labels": list(json.loads((settings.resolve(Path("text_service/data/label_mapping.json"))).read_text(encoding="utf-8")).keys()),
+        }
+        if self.classifier.error:
+            semantic_model["error"] = self.classifier.error
         return {
-            "semantic_model": {"enabled": True, "mock": self.classifier.mock, "model_dir": str(settings.model_dir), "labels": list(json.loads((settings.resolve(__import__('pathlib').Path('text_service/data/label_mapping.json'))).read_text(encoding='utf-8')).keys())},
+            "semantic_model": semantic_model,
             "rules": {"enabled": settings.enable_rules, "dictionaries": list(self.matcher.raw().keys())},
         }
 
@@ -28,7 +40,7 @@ class TextRiskPipeline:
         hits = self.matcher.match(normalized) if settings.enable_rules else []
         contacts = self.extractor.extract_contacts(normalized)
         brands = self.extractor.extract_brands(hits)
-        semantics = self.classifier.classify(hits, contacts)
+        semantics = self.classifier.classify(normalized, hits, contacts)
         score, level, risk_types = score_text(hits, semantics, brands, contacts)
         evidence = [EvidenceText(source=source, text=text, start=0, end=len(text))] if hits or contacts else []
         return TextInferResult(
@@ -59,7 +71,8 @@ class TextRiskPipeline:
         all_hits = [hit for item in results for hit in item.hit_keywords]
         all_contacts = [entity for item in results for entity in item.contact_entities]
         all_brands = [brand for item in results for brand in item.brand_entities]
-        all_semantics = self.classifier.classify(all_hits, all_contacts) if results else []
+        combined_text = "\n".join(self.normalizer.normalize(text) for _, text in fields if text)
+        all_semantics = self.classifier.classify(combined_text, all_hits, all_contacts) if results else []
         aggregate_score, aggregate_level, aggregate_types = score_text(all_hits, all_semantics, all_brands, all_contacts)
         active_fields = {item.source for item in results if item.text_score >= settings.risk_low or item.hit_keywords or item.contact_entities}
         if len(active_fields) >= 2 and aggregate_score >= settings.risk_low:

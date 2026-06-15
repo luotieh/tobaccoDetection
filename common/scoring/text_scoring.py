@@ -19,13 +19,15 @@ def score_text(
     thresholds: tuple[float, float, float] = (0.85, 0.70, 0.50),
 ) -> tuple[float, str, list[str]]:
     hit_types = {(hit.dictionary, hit.category) for hit in hits}
-    risk_hits = [hit for hit in hits if hit.dictionary in {"risk_keywords", "slang_keywords"}]
+    risk_hits = [hit for hit in hits if hit.dictionary in {"risk_keywords", "slang_keywords", "management_rule_keywords"} and hit.category not in {"whitelist", "brand"}]
     risk_categories = {hit.category for hit in risk_hits}
     hit_words = {hit.normalized_word or hit.word for hit in risk_hits}
     keyword_score = 0.0
     if ("risk_keywords", "trade") in hit_types:
         keyword_score = max(keyword_score, 0.75)
-    if any(hit.dictionary == "slang_keywords" for hit in hits):
+    if ("management_rule_keywords", "keyword") in hit_types:
+        keyword_score = max(keyword_score, 0.75)
+    if any(hit.dictionary == "slang_keywords" or (hit.dictionary == "management_rule_keywords" and hit.category == "blackword") for hit in hits):
         keyword_score = max(keyword_score, 0.80)
     if ("risk_keywords", "price") in hit_types:
         keyword_score = max(keyword_score, 0.60)
@@ -34,24 +36,34 @@ def score_text(
     if len(risk_categories) >= 2:
         keyword_score = max(keyword_score, 0.95)
 
+    semantic_scores = {item.label: item.score for item in semantics}
     semantic_score = max((item.score for item in semantics if item.label != "normal_discussion"), default=0.0)
+    if (
+        semantic_scores.get("sale_intent", 0.0) >= 0.75
+        and semantic_scores.get("trade_lead", 0.0) >= 0.75
+        and semantic_scores.get("contact_lead", 0.0) >= 0.75
+    ):
+        semantic_score = max(semantic_score, 0.90)
     brand_score = 0.80 if brands else 0.0
     contact_score = 0.90 if any(item.type in {"phone", "qq"} for item in contacts) else 0.75 if contacts else 0.0
     if ("risk_keywords", "contact") in hit_types:
         contact_score = max(contact_score, 0.80)
-    context_score = 0.80 if ("risk_keywords", "delivery") in hit_types else 0.30 if keyword_score else 0.0
-    whitelist_penalty = 0.20 if any(hit.dictionary == "whitelist_keywords" for hit in hits) else 0.0
+    context_score = 0.80 if ("risk_keywords", "delivery") in hit_types or ("management_rule_keywords", "region") in hit_types else 0.30 if keyword_score else 0.0
+    whitelist_penalty = 0.20 if any(hit.dictionary == "whitelist_keywords" or (hit.dictionary == "management_rule_keywords" and hit.category == "whitelist") for hit in hits) else 0.0
     if whitelist_penalty and not keyword_score and not contacts:
         whitelist_penalty = 0.50
+    llm_whitelist = semantic_scores.get("whitelist_context", 0.0) >= 0.80
+    if llm_whitelist and not contacts and keyword_score < 0.60:
+        whitelist_penalty = max(whitelist_penalty, 0.40)
     score = 0.30 * keyword_score + 0.35 * semantic_score + 0.15 * brand_score + 0.10 * contact_score + 0.10 * context_score - whitelist_penalty
     rule_floor = 0.0
-    has_trade = "trade" in risk_categories
+    has_trade = "trade" in risk_categories or "keyword" in risk_categories
     has_contact = bool(contacts) or "contact" in risk_categories
     has_price_or_quantity = bool({"price", "quantity"} & risk_categories)
-    has_delivery = "delivery" in risk_categories
+    has_delivery = "delivery" in risk_categories or ("management_rule_keywords", "region") in hit_types
     has_product = "product" in risk_categories
-    has_slang = any(hit.dictionary == "slang_keywords" for hit in hits)
-    has_brand = bool(brands)
+    has_slang = any(hit.dictionary == "slang_keywords" or (hit.dictionary == "management_rule_keywords" and hit.category == "blackword") for hit in hits)
+    has_brand = bool(brands) or ("management_rule_keywords", "brand") in hit_types
     if has_trade and has_contact:
         rule_floor = max(rule_floor, 0.88)
     if has_trade and has_price_or_quantity:
@@ -83,8 +95,8 @@ def score_text(
         risk_types.append("slang_mention")
     if has_brand:
         risk_types.append("brand_mention")
-    if any(hit.dictionary == "whitelist_keywords" for hit in hits):
+    if any(hit.dictionary == "whitelist_keywords" or (hit.dictionary == "management_rule_keywords" and hit.category == "whitelist") for hit in hits):
         risk_types.append("whitelist_context")
-    if any(hit.category == "delivery" for hit in hits):
+    if any(hit.category == "delivery" or (hit.dictionary == "management_rule_keywords" and hit.category == "region") for hit in hits):
         risk_types.append("regional_delivery_context")
     return score, risk_level(score, *thresholds), sorted(set(risk_types)) or ["normal_discussion"]

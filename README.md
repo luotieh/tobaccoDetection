@@ -20,7 +20,7 @@
 
 ## 运行要求
 
-- Python 3.10+
+- Python 3.10+（已兼容至 3.13，不再依赖 3.13 移除的 `cgi` 模块）
 - 图像识别依赖 `ultralytics`、`opencv-python`
 - 文本/语音服务依赖 `fastapi`、`uvicorn`、`python-multipart`；语音真实媒体处理建议安装 FFmpeg。
 
@@ -270,9 +270,40 @@ pytest
 
 ## 文本识别服务
 
-`text_service` 根据落地方案提供可运行文本风险服务，默认端口 `8010`。当前实现包含公共归一化、词库加载、关键词匹配、实体抽取、联系方式脱敏、Mock/可选 Transformers 分类器、风险评分和解释生成。
+`text_service` 根据落地方案提供可运行文本风险服务，默认端口 `8010`。当前实现包含公共归一化、词库加载、关键词匹配、实体抽取、联系方式脱敏、Mock/可选 Transformers/本地 LLM 语义分类器、风险评分和解释生成。
 
 ```bash
+TEXT_PORT=8010 scripts/run_text_dev.sh
+```
+
+语义分类引擎通过 `TEXT_SEMANTIC_ENGINE` 选择，默认 `mock` 不需要额外模型依赖。可选值：
+
+```text
+mock          规则驱动的轻量语义分类，适合本地开发和无模型部署
+transformers 读取 TEXT_MODEL_DIR 下的文本分类模型
+llm           读取本地指令模型或第三方 OpenAI 兼容 API，并解析 JSON 标签输出
+```
+
+启用本地 LLM 前需自行安装可选依赖并准备模型目录，默认依赖文件不会强制安装大模型运行库：
+
+```bash
+pip install transformers accelerate sentencepiece torch
+TEXT_SEMANTIC_ENGINE=llm \
+TEXT_LLM_MODEL_DIR=text_models/qwen2.5-0.5b-instruct \
+TEXT_USE_MOCK_MODEL=false \
+TEXT_PORT=8010 scripts/run_text_dev.sh
+```
+
+接入第三方 OpenAI 兼容 API 时无需安装本地大模型依赖，API Key 通过环境变量注入：
+
+```bash
+export TEXT_LLM_API_KEY=sk-...
+TEXT_SEMANTIC_ENGINE=llm \
+TEXT_LLM_PROVIDER=openai_compatible \
+TEXT_LLM_API_BASE_URL=https://api.example.com/v1 \
+TEXT_LLM_API_MODEL=deepseek-chat \
+TEXT_LLM_API_KEY_ENV=TEXT_LLM_API_KEY \
+TEXT_USE_MOCK_MODEL=true \
 TEXT_PORT=8010 scripts/run_text_dev.sh
 ```
 

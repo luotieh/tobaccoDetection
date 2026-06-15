@@ -33,6 +33,9 @@ class DictionaryLoader:
                 raise FileNotFoundError(f"Dictionary file not found: {path}")
             data[name] = json.loads(path.read_text(encoding="utf-8"))
             versions.append(str(int(path.stat().st_mtime)))
+        management_path = self.data_dir / "management_rule_keywords.json"
+        if management_path.exists():
+            data["management_rule_keywords"] = json.loads(management_path.read_text(encoding="utf-8"))
+            versions.append(str(int(management_path.stat().st_mtime)))
         self._version = ".".join(versions)
         return data
-

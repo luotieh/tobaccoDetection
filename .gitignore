@@ -2,6 +2,7 @@ __pycache__/
 *.pyc
 *:Zone.Identifier
 .venv/
+.cursor/
 data/*.db
 data/*.db-*
 models/*.pt

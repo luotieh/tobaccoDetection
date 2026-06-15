@@ -15,6 +15,16 @@ async def test_text_health():
     assert res.json()["status"] == "ok"
 
 
+@pytest.mark.anyio
+async def test_models_info_exposes_semantic_engine():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        res = await client.get("/models/info")
+    semantic_model = res.json()["semantic_model"]
+    assert semantic_model["engine"] in {"mock", "transformers", "llm"}
+    assert "mock" in semantic_model
+    assert "model_dir" in semantic_model
+
+
 def test_normalizer_traditional_and_variant():
     assert "中华" in TextNormalizer().normalize("中華 华子")
 

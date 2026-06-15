@@ -1,16 +1,22 @@
 #!/usr/bin/env python3
 import base64
-import cgi
+import csv
 import http.client
+import io
 import json
 import os
 import random
 import re
+import signal
 import sqlite3
+import subprocess
 import sys
 import tempfile
+import threading
+import time
 import uuid
 from datetime import datetime, timedelta
+from email.message import Message as EmailMessage
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
@@ -20,6 +26,7 @@ ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
 DATA_DIR = ROOT / "data"
 DB_PATH = DATA_DIR / "demo.db"
+RUNTIME_DIR = ROOT / ".runtime"
 MODEL_REGISTRY = {
     "basant-yolo26s": {
         "name": "basant18/Smoking-detection-YOLO26s",
@@ -40,6 +47,7 @@ DEFAULT_DETECTOR_MODEL_ID = os.environ.get("SMOKING_DETECTOR_MODEL", "basant-yol
 VISION_SERVICE_URL = os.environ.get("VISION_SERVICE_URL", "http://127.0.0.1:9000")
 TEXT_SERVICE_URL = os.environ.get("TEXT_SERVICE_URL", "http://127.0.0.1:8010")
 AUDIO_SERVICE_URL = os.environ.get("AUDIO_SERVICE_URL", "http://127.0.0.1:8020")
+AUTO_RECOGNIZE = os.environ.get("AUTO_RECOGNIZE", "true").strip().lower() not in {"0", "false", "no", "off"}
 _YOLO_MODELS = {}
 
 
@@ -140,6 +148,14 @@ CONTENT_ITEM_EXTRA_COLUMNS = {
     "raw_payload": "TEXT DEFAULT ''",
 }
 
+LLM_TEXT_CONFIG_EXTRA_COLUMNS = {
+    "llm_provider": "TEXT NOT NULL DEFAULT 'local'",
+    "llm_api_base_url": "TEXT NOT NULL DEFAULT ''",
+    "llm_api_key_env": "TEXT NOT NULL DEFAULT 'TEXT_LLM_API_KEY'",
+    "llm_api_key": "TEXT NOT NULL DEFAULT ''",
+    "llm_api_model": "TEXT NOT NULL DEFAULT ''",
+}
+
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS content_items (
@@ -201,6 +217,24 @@ CREATE TABLE IF NOT EXISTS fusion_config (
   high_risk_threshold REAL NOT NULL,
   medium_risk_threshold REAL NOT NULL,
   low_risk_threshold REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS llm_text_config (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  semantic_engine TEXT NOT NULL,
+  use_mock_model INTEGER NOT NULL,
+  transformer_model_dir TEXT NOT NULL,
+  llm_provider TEXT NOT NULL DEFAULT 'local',
+  llm_model_dir TEXT NOT NULL,
+  llm_api_base_url TEXT NOT NULL DEFAULT '',
+  llm_api_key_env TEXT NOT NULL DEFAULT 'TEXT_LLM_API_KEY',
+  llm_api_key TEXT NOT NULL DEFAULT '',
+  llm_api_model TEXT NOT NULL DEFAULT '',
+  llm_max_new_tokens INTEGER NOT NULL,
+  llm_temperature REAL NOT NULL,
+  llm_timeout_seconds INTEGER NOT NULL,
+  max_text_length INTEGER NOT NULL,
+  updated_at TEXT NOT NULL
 );
 
 CREATE TABLE IF NOT EXISTS recognition_results (
@@ -314,6 +348,10 @@ def init_db():
         for column, definition in CONTENT_ITEM_EXTRA_COLUMNS.items():
             if column not in existing_columns:
                 conn.execute(f"ALTER TABLE content_items ADD COLUMN {column} {definition}")
+        existing_llm_columns = table_columns(conn, "llm_text_config")
+        for column, definition in LLM_TEXT_CONFIG_EXTRA_COLUMNS.items():
+            if column not in existing_llm_columns:
+                conn.execute(f"ALTER TABLE llm_text_config ADD COLUMN {column} {definition}")
         if conn.execute("SELECT COUNT(*) FROM model_configs").fetchone()[0] == 0:
             conn.executemany("INSERT INTO model_configs VALUES (?,?,?,?,?,?,?,?,?)", MODELS)
         else:
@@ -330,6 +368,30 @@ def init_db():
                     conn.execute("INSERT INTO model_configs VALUES (?,?,?,?,?,?,?,?,?)", model)
         if conn.execute("SELECT COUNT(*) FROM fusion_config").fetchone()[0] == 0:
             conn.execute("INSERT INTO fusion_config VALUES (1,0.30,0.35,0.25,0.10,0.85,0.65,0.40)")
+        if conn.execute("SELECT COUNT(*) FROM llm_text_config").fetchone()[0] == 0:
+            conn.execute(
+                """INSERT INTO llm_text_config
+                   (id, semantic_engine, use_mock_model, transformer_model_dir, llm_provider, llm_model_dir,
+                    llm_api_base_url, llm_api_key_env, llm_api_key, llm_api_model, llm_max_new_tokens,
+                    llm_temperature, llm_timeout_seconds, max_text_length, updated_at)
+                   VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (
+                    os.environ.get("TEXT_SEMANTIC_ENGINE", "mock"),
+                    1 if os.environ.get("TEXT_USE_MOCK_MODEL", "true").lower() in {"1", "true", "yes", "on"} else 0,
+                    os.environ.get("TEXT_MODEL_DIR", "text_models/text-risk-model"),
+                    os.environ.get("TEXT_LLM_PROVIDER", "local"),
+                    os.environ.get("TEXT_LLM_MODEL_DIR", "text_models/qwen2.5-0.5b-instruct"),
+                    os.environ.get("TEXT_LLM_API_BASE_URL", ""),
+                    os.environ.get("TEXT_LLM_API_KEY_ENV", "TEXT_LLM_API_KEY"),
+                    os.environ.get(os.environ.get("TEXT_LLM_API_KEY_ENV", "TEXT_LLM_API_KEY"), ""),
+                    os.environ.get("TEXT_LLM_API_MODEL", ""),
+                    int(os.environ.get("TEXT_LLM_MAX_NEW_TOKENS", "256")),
+                    float(os.environ.get("TEXT_LLM_TEMPERATURE", "0.0")),
+                    int(os.environ.get("TEXT_LLM_TIMEOUT_SECONDS", "10")),
+                    int(os.environ.get("TEXT_MAX_TEXT_LENGTH", "512")),
+                    now(),
+                ),
+            )
         if conn.execute("SELECT COUNT(*) FROM rule_words").fetchone()[0] == 0:
             for idx, (typ, word, weight, remark) in enumerate(RULES, 1):
                 conn.execute(
@@ -988,6 +1050,319 @@ def fusion_config():
         return row_to_dict(conn.execute("SELECT * FROM fusion_config WHERE id=1").fetchone())
 
 
+def mask_secret(value):
+    if not value:
+        return ""
+    if len(value) <= 8:
+        return "*" * len(value)
+    return f"{value[:4]}...{value[-4:]}"
+
+
+def llm_text_config(include_secret=False):
+    with db() as conn:
+        cfg = row_to_dict(conn.execute("SELECT * FROM llm_text_config WHERE id=1").fetchone())
+    if cfg and not include_secret:
+        api_key = cfg.pop("llm_api_key", "") or ""
+        cfg["llm_api_key_set"] = bool(api_key)
+        cfg["llm_api_key_masked"] = mask_secret(api_key)
+    env = {
+        "TEXT_SEMANTIC_ENGINE": os.environ.get("TEXT_SEMANTIC_ENGINE", "mock"),
+        "TEXT_USE_MOCK_MODEL": os.environ.get("TEXT_USE_MOCK_MODEL", "true"),
+        "TEXT_MODEL_DIR": os.environ.get("TEXT_MODEL_DIR", "text_models/text-risk-model"),
+        "TEXT_LLM_PROVIDER": os.environ.get("TEXT_LLM_PROVIDER", "local"),
+        "TEXT_LLM_MODEL_DIR": os.environ.get("TEXT_LLM_MODEL_DIR", "text_models/qwen2.5-0.5b-instruct"),
+        "TEXT_LLM_API_BASE_URL": os.environ.get("TEXT_LLM_API_BASE_URL", ""),
+        "TEXT_LLM_API_KEY": mask_secret(os.environ.get(os.environ.get("TEXT_LLM_API_KEY_ENV", "TEXT_LLM_API_KEY"), "")),
+        "TEXT_LLM_API_MODEL": os.environ.get("TEXT_LLM_API_MODEL", ""),
+        "TEXT_LLM_MAX_NEW_TOKENS": os.environ.get("TEXT_LLM_MAX_NEW_TOKENS", "256"),
+        "TEXT_LLM_TEMPERATURE": os.environ.get("TEXT_LLM_TEMPERATURE", "0.0"),
+        "TEXT_LLM_TIMEOUT_SECONDS": os.environ.get("TEXT_LLM_TIMEOUT_SECONDS", "10"),
+        "TEXT_MAX_TEXT_LENGTH": os.environ.get("TEXT_MAX_TEXT_LENGTH", "512"),
+    }
+    return {"saved": cfg, "runtime_env": env, "text_service_url": TEXT_SERVICE_URL}
+
+
+def api_update_llm_text_config(payload):
+    semantic_engine = str(payload.get("semantic_engine") or "mock").lower()
+    if semantic_engine not in {"mock", "transformers", "llm"}:
+        raise ValueError("semantic_engine must be mock, transformers or llm")
+    use_mock_model = 1 if bool(payload.get("use_mock_model")) else 0
+    transformer_model_dir = str(payload.get("transformer_model_dir") or "text_models/text-risk-model").strip()
+    llm_provider = str(payload.get("llm_provider") or "local").lower()
+    if llm_provider not in {"local", "openai_compatible"}:
+        raise ValueError("llm_provider must be local or openai_compatible")
+    llm_model_dir = str(payload.get("llm_model_dir") or "text_models/qwen2.5-0.5b-instruct").strip()
+    llm_api_base_url = str(payload.get("llm_api_base_url") or "").strip()
+    llm_api_key_env = str(payload.get("llm_api_key_env") or "TEXT_LLM_API_KEY").strip()
+    llm_api_key = str(payload.get("llm_api_key") or "").strip()
+    llm_api_model = str(payload.get("llm_api_model") or "").strip()
+    llm_max_new_tokens = max(1, min(2048, int(payload.get("llm_max_new_tokens") or 256)))
+    llm_temperature = max(0.0, min(2.0, float(payload.get("llm_temperature") or 0.0)))
+    llm_timeout_seconds = max(1, min(600, int(payload.get("llm_timeout_seconds") or 10)))
+    max_text_length = max(64, min(8192, int(payload.get("max_text_length") or 512)))
+    with db() as conn:
+        conn.execute(
+            """UPDATE llm_text_config
+               SET semantic_engine=?, use_mock_model=?, transformer_model_dir=?, llm_provider=?, llm_model_dir=?,
+                   llm_api_base_url=?, llm_api_key_env=?, llm_api_model=?,
+                   llm_max_new_tokens=?, llm_temperature=?, llm_timeout_seconds=?, max_text_length=?, updated_at=?
+               WHERE id=1""",
+            (
+                semantic_engine,
+                use_mock_model,
+                transformer_model_dir,
+                llm_provider,
+                llm_model_dir,
+                llm_api_base_url,
+                llm_api_key_env,
+                llm_api_model,
+                llm_max_new_tokens,
+                llm_temperature,
+                llm_timeout_seconds,
+                max_text_length,
+                now(),
+            ),
+        )
+        if llm_api_key:
+            conn.execute("UPDATE llm_text_config SET llm_api_key=?, updated_at=? WHERE id=1", (llm_api_key, now()))
+    return llm_text_config()
+
+
+def llm_chat_completions_target(base_url):
+    parsed = urlparse(base_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("API Base URL must be a valid http/https URL")
+    base_path = parsed.path.rstrip("/")
+    target = base_path if base_path.endswith("/chat/completions") else f"{base_path}/chat/completions"
+    if not target.startswith("/"):
+        target = f"/{target}"
+    return parsed, target
+
+
+def api_llm_health_check(payload):
+    cfg = llm_text_config(include_secret=True).get("saved") or {}
+    merged = {**cfg, **(payload or {})}
+    provider = str(merged.get("llm_provider") or "local").lower()
+    if provider != "openai_compatible":
+        return {
+            "ok": False,
+            "provider": provider,
+            "message": "仅第三方 API 模式需要健康检查，请将 LLM 来源设为 openai_compatible。",
+        }
+    base_url = str(merged.get("llm_api_base_url") or "").strip()
+    model = str(merged.get("llm_api_model") or "").strip()
+    key_env = str(merged.get("llm_api_key_env") or "TEXT_LLM_API_KEY").strip()
+    request_api_key = str((payload or {}).get("llm_api_key") or "").strip()
+    saved_api_key = str(cfg.get("llm_api_key") or "").strip()
+    api_key = request_api_key or saved_api_key or os.environ.get(key_env, "")
+    api_key_source = "page_input" if request_api_key else "saved_config" if saved_api_key else "environment"
+    timeout = max(1, min(60, int(merged.get("llm_timeout_seconds") or 10)))
+    if not base_url or not model:
+        return {"ok": False, "provider": provider, "message": "请填写 API Base URL 和 API 模型名。"}
+    if not api_key:
+        return {
+            "ok": False,
+            "provider": provider,
+            "endpoint": base_url,
+            "model": model,
+            "api_key_env": key_env,
+            "api_key_present": False,
+            "api_key_source": api_key_source,
+            "message": "API Key 未填写或保存，无法调用第三方 API。",
+        }
+    parsed, target = llm_chat_completions_target(base_url)
+    body = json.dumps(
+        {
+            "model": model,
+            "messages": [{"role": "user", "content": "health check"}],
+            "temperature": 0,
+            "max_tokens": 8,
+        },
+        ensure_ascii=False,
+    ).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Authorization": f"Bearer {api_key}",
+    }
+    conn_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    start = datetime.now()
+    conn = conn_cls(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), timeout=timeout)
+    try:
+        conn.request("POST", target, body=body, headers=headers)
+        resp = conn.getresponse()
+        raw = resp.read().decode("utf-8", errors="replace")
+        latency_ms = int((datetime.now() - start).total_seconds() * 1000)
+        try:
+            data = json.loads(raw) if raw else {}
+        except json.JSONDecodeError:
+            data = {}
+        if resp.status >= 400:
+            error_payload = data.get("error") if isinstance(data, dict) else None
+            message = error_payload.get("message") if isinstance(error_payload, dict) else error_payload
+            return {
+                "ok": False,
+                "provider": provider,
+                "endpoint": f"{parsed.scheme}://{parsed.netloc}{target}",
+                "model": model,
+                "status_code": resp.status,
+                "latency_ms": latency_ms,
+                "api_key_env": key_env,
+                "api_key_present": True,
+                "api_key_source": api_key_source,
+                "message": message or raw[:300] or f"HTTP {resp.status}",
+            }
+        choices = data.get("choices") if isinstance(data, dict) else None
+        content = ""
+        if choices and isinstance(choices[0], dict):
+            message = choices[0].get("message")
+            content = str(message.get("content") or "") if isinstance(message, dict) else str(choices[0].get("text") or "")
+        return {
+            "ok": True,
+            "provider": provider,
+            "endpoint": f"{parsed.scheme}://{parsed.netloc}{target}",
+            "model": model,
+            "status_code": resp.status,
+            "latency_ms": latency_ms,
+            "api_key_env": key_env,
+            "api_key_present": True,
+            "api_key_source": api_key_source,
+            "response_preview": content[:120],
+            "message": "第三方 API 连接正常。",
+        }
+    except Exception as exc:
+        return {
+            "ok": False,
+            "provider": provider,
+            "endpoint": base_url,
+            "model": model,
+            "api_key_env": key_env,
+            "api_key_present": True,
+            "api_key_source": api_key_source,
+            "message": str(exc),
+        }
+    finally:
+        conn.close()
+
+
+def text_service_port():
+    parsed = urlparse(TEXT_SERVICE_URL)
+    return parsed.port or (443 if parsed.scheme == "https" else 80)
+
+
+def text_service_env_from_config(cfg):
+    env = os.environ.copy()
+    api_key = cfg.get("llm_api_key") or env.get("TEXT_LLM_API_KEY", "")
+    env.update(
+        {
+            "TEXT_SEMANTIC_ENGINE": str(cfg.get("semantic_engine") or "mock"),
+            "TEXT_USE_MOCK_MODEL": "true" if int(cfg.get("use_mock_model") or 0) else "false",
+            "TEXT_MODEL_DIR": str(cfg.get("transformer_model_dir") or "text_models/text-risk-model"),
+            "TEXT_LLM_PROVIDER": str(cfg.get("llm_provider") or "local"),
+            "TEXT_LLM_MODEL_DIR": str(cfg.get("llm_model_dir") or "text_models/qwen2.5-0.5b-instruct"),
+            "TEXT_LLM_API_BASE_URL": str(cfg.get("llm_api_base_url") or ""),
+            "TEXT_LLM_API_KEY_ENV": "TEXT_LLM_API_KEY",
+            "TEXT_LLM_API_MODEL": str(cfg.get("llm_api_model") or ""),
+            "TEXT_LLM_MAX_NEW_TOKENS": str(cfg.get("llm_max_new_tokens") or 256),
+            "TEXT_LLM_TEMPERATURE": str(cfg.get("llm_temperature") or 0.0),
+            "TEXT_LLM_TIMEOUT_SECONDS": str(cfg.get("llm_timeout_seconds") or 10),
+            "TEXT_MAX_TEXT_LENGTH": str(cfg.get("max_text_length") or 512),
+            "TEXT_PORT": str(text_service_port()),
+        }
+    )
+    if api_key:
+        env["TEXT_LLM_API_KEY"] = api_key
+    return env
+
+
+def listening_pids_on_port(port):
+    try:
+        output = subprocess.check_output(["ss", "-ltnp"], text=True, stderr=subprocess.DEVNULL)
+    except Exception:
+        return []
+    pids = []
+    for line in output.splitlines():
+        if f":{port} " not in line:
+            continue
+        for pid in re.findall(r"pid=(\d+)", line):
+            value = int(pid)
+            if value != os.getpid() and value not in pids:
+                pids.append(value)
+    return pids
+
+
+def stop_processes(pids):
+    stopped = []
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+            stopped.append(pid)
+        except ProcessLookupError:
+            continue
+    deadline = time.time() + 3
+    while time.time() < deadline:
+        alive = []
+        for pid in stopped:
+            try:
+                os.kill(pid, 0)
+                alive.append(pid)
+            except ProcessLookupError:
+                continue
+        if not alive:
+            return stopped
+        time.sleep(0.1)
+    for pid in stopped:
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    return stopped
+
+
+def api_apply_text_service_config(payload):
+    api_update_llm_text_config(payload or {})
+    cfg = llm_text_config(include_secret=True).get("saved") or {}
+    port = text_service_port()
+    old_pids = listening_pids_on_port(port)
+    stopped = stop_processes(old_pids)
+    env = text_service_env_from_config(cfg)
+    RUNTIME_DIR.mkdir(exist_ok=True)
+    log_file = RUNTIME_DIR / "text.log"
+    log_handle = log_file.open("ab")
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "uvicorn", "text_service.main:app", "--host", "0.0.0.0", "--port", str(port)],
+        cwd=str(ROOT),
+        env=env,
+        stdout=log_handle,
+        stderr=subprocess.STDOUT,
+        start_new_session=True,
+    )
+    log_handle.close()
+    (RUNTIME_DIR / "text.pid").write_text(str(proc.pid), encoding="utf-8")
+    time.sleep(1.0)
+    status = None
+    error = ""
+    try:
+        status = text_service_status()
+    except Exception as exc:
+        error = str(exc)
+    return {
+        "success": bool(status),
+        "message": "文本服务已按当前配置重启。" if status else "文本服务重启已发起，但状态检查失败。",
+        "port": port,
+        "stopped_pids": stopped,
+        "started_pid": proc.pid,
+        "status": status,
+        "error": error,
+        "applied": {
+            "semantic_engine": env.get("TEXT_SEMANTIC_ENGINE"),
+            "llm_provider": env.get("TEXT_LLM_PROVIDER"),
+            "llm_api_base_url": env.get("TEXT_LLM_API_BASE_URL"),
+            "llm_api_model": env.get("TEXT_LLM_API_MODEL"),
+            "llm_api_key_set": bool(env.get("TEXT_LLM_API_KEY")),
+        },
+    }
+
+
 def analyze_fusion(payload):
     cfg = fusion_config()
     text_score = float(payload.get("text_risk_score") or 0)
@@ -1111,6 +1486,63 @@ def recognize_content(content_id):
     return get_content_detail(content_id)
 
 
+_auto_recognize_event = threading.Event()
+_auto_recognize_thread = None
+_auto_recognize_thread_lock = threading.Lock()
+
+
+def next_pending_content_id():
+    """取下一条待识别内容：新内容(created_at 最新)优先，再回溯历史未识别数据。"""
+    with db() as conn:
+        row = conn.execute(
+            "SELECT id FROM content_items WHERE recognize_status='pending' "
+            "ORDER BY created_at DESC, id DESC LIMIT 1"
+        ).fetchone()
+    return row["id"] if row else None
+
+
+def drain_pending_recognition():
+    """顺序识别所有待识别(pending)内容，直到队列清空。"""
+    while True:
+        content_id = next_pending_content_id()
+        if not content_id:
+            break
+        try:
+            recognize_content(content_id)
+        except Exception as exc:
+            # 单条失败不能阻塞队列；标记 failed 避免无限重复处理
+            sys.stderr.write("[auto-recognize] %s 识别失败: %s\n" % (content_id, exc))
+            try:
+                with db() as conn:
+                    conn.execute(
+                        "UPDATE content_items SET recognize_status='failed', updated_at=? WHERE id=?",
+                        (now(), content_id),
+                    )
+            except Exception:
+                pass
+
+
+def _auto_recognize_loop():
+    while True:
+        _auto_recognize_event.wait()
+        _auto_recognize_event.clear()
+        drain_pending_recognition()
+
+
+def trigger_auto_recognize():
+    """触发后台顺序识别：自动识别新内容，并依次清空历史未识别(pending)队列。"""
+    if not AUTO_RECOGNIZE:
+        return
+    global _auto_recognize_thread
+    with _auto_recognize_thread_lock:
+        if _auto_recognize_thread is None or not _auto_recognize_thread.is_alive():
+            _auto_recognize_thread = threading.Thread(
+                target=_auto_recognize_loop, name="auto-recognize", daemon=True
+            )
+            _auto_recognize_thread.start()
+    _auto_recognize_event.set()
+
+
 def get_content_detail(content_id):
     with db() as conn:
         content = row_to_dict(conn.execute("SELECT * FROM content_items WHERE id=?", (content_id,)).fetchone())
@@ -1129,6 +1561,56 @@ def get_content_detail(content_id):
     content["author"] = json_loads(content.get("author_json"), {})
     content["media_list_parsed"] = json_loads(content.get("media_list"), [])
     return {"content": content, "results": results, "reviews": reviews, "push_logs": pushes, "comments": comments}
+
+
+def parse_multipart_form(body, content_type):
+    """解析 multipart/form-data，替代 Python 3.13 已移除的 cgi 模块。
+
+    返回 (fields, files)：
+      fields: {name: str}              普通文本字段
+      files:  {name: {"filename", "data"}}  文件字段（data 为原始字节）
+
+    仅用 email 模块解析文本头部，二进制内容直接从字节切片，避免编码损坏。
+    """
+    type_header = EmailMessage()
+    type_header["content-type"] = content_type or ""
+    boundary = type_header.get_param("boundary")
+    if not boundary:
+        raise ValueError("缺少 multipart 边界(boundary)")
+    if isinstance(boundary, tuple):  # RFC 2231 编码形式
+        boundary = boundary[2]
+    delimiter = b"--" + boundary.encode("latin-1")
+
+    fields = {}
+    files = {}
+    for segment in body.split(delimiter):
+        if not segment or segment in (b"\r\n", b"--\r\n", b"--"):
+            continue
+        if segment.startswith(b"--"):  # 结束边界，忽略尾部
+            break
+        if segment.startswith(b"\r\n"):
+            segment = segment[2:]
+        if segment.endswith(b"\r\n"):
+            segment = segment[:-2]
+        header_blob, sep, content = segment.partition(b"\r\n\r\n")
+        if not sep:
+            continue
+        part = EmailMessage()
+        for line in header_blob.split(b"\r\n"):
+            if b":" in line:
+                key, _, val = line.decode("latin-1").partition(":")
+                part[key.strip()] = val.strip()
+        name = part.get_param("name", header="content-disposition")
+        if name is None:
+            continue
+        if isinstance(name, tuple):
+            name = name[2]
+        filename = part.get_filename()
+        if filename is not None:
+            files[name] = {"filename": filename, "data": content}
+        else:
+            fields[name] = content.decode("utf-8", "replace")
+    return fields, files
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -1164,53 +1646,37 @@ class Handler(BaseHTTPRequestHandler):
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
+    def read_multipart_form(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        body = self.rfile.read(length) if length > 0 else b""
+        return parse_multipart_form(body, self.headers.get("Content-Type", ""))
+
     def body_multipart_image(self):
-        form = cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={
-                "REQUEST_METHOD": "POST",
-                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
-            },
-        )
-        image = form["image"] if "image" in form else None
-        if image is None or not getattr(image, "file", None):
+        fields, files = self.read_multipart_form()
+        image = files.get("image")
+        if not image:
             raise ValueError("缺少 image 文件字段")
-        def form_value(name, default):
-            return form[name].value if name in form and not getattr(form[name], "filename", None) else default
         return {
-            "image_bytes": image.file.read(),
-            "filename": image.filename or "upload.jpg",
-            "conf": float(form_value("conf", 0.5)),
-            "imgsz": int(form_value("imgsz", 800)),
-            "model_id": form_value("model_id", DEFAULT_DETECTOR_MODEL_ID),
+            "image_bytes": image["data"],
+            "filename": image["filename"] or "upload.jpg",
+            "conf": float(fields.get("conf", 0.5)),
+            "imgsz": int(fields.get("imgsz", 800)),
+            "model_id": fields.get("model_id", DEFAULT_DETECTOR_MODEL_ID),
         }
 
     def body_multipart_file(self):
-        form = cgi.FieldStorage(
-            fp=self.rfile,
-            headers=self.headers,
-            environ={
-                "REQUEST_METHOD": "POST",
-                "CONTENT_TYPE": self.headers.get("Content-Type", ""),
-                "CONTENT_LENGTH": self.headers.get("Content-Length", "0"),
-            },
-        )
-        upload = form["file"] if "file" in form else None
-        if upload is None or not getattr(upload, "file", None):
+        fields, files = self.read_multipart_form()
+        upload = files.get("file")
+        if not upload:
             raise ValueError("缺少 file 文件字段")
-
-        def form_value(name, default=""):
-            return form[name].value if name in form and not getattr(form[name], "filename", None) else default
-
         return {
             "file": {
-                "data": upload.file.read(),
-                "filename": upload.filename or "upload.bin",
+                "data": upload["data"],
+                "filename": upload["filename"] or "upload.bin",
             },
-            "content_id": form_value("content_id"),
-            "save_evidence": form_value("save_evidence", "true"),
+            "content_id": fields.get("content_id", ""),
+            "rule_type": fields.get("rule_type", "keyword"),
+            "save_evidence": fields.get("save_evidence", "true"),
         }
 
     def serve_static(self):
@@ -1262,6 +1728,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(audio_service_status())
             if path == "/api/fusion-config":
                 return self.send_json(fusion_config())
+            if path == "/api/text-llm-config":
+                return self.send_json(llm_text_config())
             if path == "/api/rules":
                 return self.send_json(api_rules(qs))
             if path == "/api/reviews":
@@ -1291,15 +1759,26 @@ class Handler(BaseHTTPRequestHandler):
                 if payload["content_id"]:
                     fields["content_id"] = payload["content_id"]
                 return self.send_json(service_post_file(AUDIO_SERVICE_URL, service_path, payload["file"], fields))
+            if path == "/api/rules/import":
+                payload = self.body_multipart_file()
+                return self.send_json(api_import_rules(payload["file"], payload.get("rule_type") or "keyword"), 201)
             payload = self.body_json()
             if path == "/api/text-service/infer-text":
                 return self.send_json(merge_business_text_rules(payload, service_post_json(TEXT_SERVICE_URL, "/infer/text", payload)))
             if path == "/api/text-service/infer-content":
                 return self.send_json(service_post_json(TEXT_SERVICE_URL, "/infer/content", payload))
+            if path == "/api/text-llm-config/health-check":
+                return self.send_json(api_llm_health_check(payload))
+            if path == "/api/text-llm-config/apply-text-service":
+                return self.send_json(api_apply_text_service_config(payload))
             if path == "/api/contents":
-                return self.send_json(api_create_content(payload), 201)
+                content = api_create_content(payload)
+                trigger_auto_recognize()
+                return self.send_json(content, 201)
             if path == "/api/crawler/push":
                 result = api_crawler_push(payload)
+                if result.get("created"):
+                    trigger_auto_recognize()
                 return self.send_json(result, 201 if result.get("success") else 400)
             if m := re.match(r"^/api/contents/([^/]+)/recognize$", path):
                 detail = recognize_content(m.group(1))
@@ -1336,6 +1815,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(api_update_model(m.group(1), payload))
             if path == "/api/fusion-config":
                 return self.send_json(api_update_fusion(payload))
+            if path == "/api/text-llm-config":
+                return self.send_json(api_update_llm_text_config(payload))
             if m := re.match(r"^/api/rules/([^/]+)$", path):
                 return self.send_json(api_update_rule(m.group(1), payload))
             return self.send_json({"error": "not found"}, 404)
@@ -1354,6 +1835,7 @@ class Handler(BaseHTTPRequestHandler):
             if m := re.match(r"^/api/rules/([^/]+)$", path):
                 with db() as conn:
                     conn.execute("DELETE FROM rule_words WHERE id=?", (m.group(1),))
+                sync_rules_to_text_dictionaries()
                 return self.send_json({"success": True})
             return self.send_json({"error": "not found"}, 404)
         except Exception as exc:
@@ -1688,6 +2170,24 @@ def api_rules(qs):
         return rows_to_list(conn.execute(sql, args).fetchall())
 
 
+def sync_rules_to_text_dictionaries():
+    data_dir = ROOT / "text_service" / "data"
+    if not data_dir.exists():
+        return
+    with db() as conn:
+        rows = rows_to_list(conn.execute("SELECT * FROM rule_words WHERE enabled=1").fetchall())
+    imports = {"keyword": [], "blackword": [], "brand": [], "whitelist": [], "region": []}
+    for row in rows:
+        word = str(row.get("word") or "").strip()
+        if not word:
+            continue
+        typ = row.get("rule_type")
+        if typ in imports:
+            imports[typ].append(word)
+    payload = {key: sorted(set(words)) for key, words in imports.items() if words}
+    (data_dir / "management_rule_keywords.json").write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+
+
 def api_create_rule(payload):
     rid = new_id("RW")
     with db() as conn:
@@ -1695,7 +2195,101 @@ def api_create_rule(payload):
             "INSERT INTO rule_words VALUES (?,?,?,?,?,?,?)",
             (rid, payload.get("rule_type", "keyword"), payload.get("word", ""), float(payload.get("risk_weight", 0.1)), int(payload.get("enabled", 1)), payload.get("remark", ""), now()),
         )
-        return row_to_dict(conn.execute("SELECT * FROM rule_words WHERE id=?", (rid,)).fetchone())
+        row = row_to_dict(conn.execute("SELECT * FROM rule_words WHERE id=?", (rid,)).fetchone())
+    sync_rules_to_text_dictionaries()
+    return row
+
+
+def normalize_rule_type(value):
+    value = str(value or "keyword").strip()
+    aliases = {
+        "关键词": "keyword",
+        "黑话": "blackword",
+        "品牌": "brand",
+        "品牌词": "brand",
+        "白名单": "whitelist",
+        "地域": "region",
+        "地域词": "region",
+    }
+    return aliases.get(value, value if value in {"keyword", "blackword", "brand", "whitelist", "region"} else "keyword")
+
+
+def parse_rule_upload(file_payload, default_rule_type="keyword"):
+    filename = file_payload.get("filename") or ""
+    text = file_payload.get("data", b"").decode("utf-8-sig", errors="ignore")
+    suffix = Path(filename).suffix.lower()
+    rows = []
+    if suffix == ".json":
+        data = json.loads(text or "[]")
+        if isinstance(data, list):
+            source_rows = data
+        elif isinstance(data, dict):
+            source_rows = []
+            for typ, value in data.items():
+                if isinstance(value, dict):
+                    for category, words in value.items():
+                        for word in words if isinstance(words, list) else [words]:
+                            source_rows.append({"rule_type": typ, "word": word, "remark": str(category)})
+                else:
+                    for word in value if isinstance(value, list) else [value]:
+                        source_rows.append({"rule_type": typ, "word": word})
+        else:
+            source_rows = []
+        for item in source_rows:
+            if isinstance(item, str):
+                rows.append({"rule_type": default_rule_type, "word": item})
+            elif isinstance(item, dict):
+                rows.append(item)
+    elif suffix == ".csv":
+        csv_rows = list(csv.reader(io.StringIO(text)))
+        if csv_rows:
+            header = [item.strip() for item in csv_rows[0]]
+            has_header = bool({"word", "词条", "rule_type", "类型"} & set(header))
+            if has_header:
+                rows.extend(csv.DictReader(io.StringIO(text)))
+            else:
+                for parts in csv_rows:
+                    if parts and parts[0].strip():
+                        rows.append({"word": parts[0].strip(), "rule_type": default_rule_type})
+    else:
+        for line in text.splitlines():
+            word = line.strip()
+            if word and not word.startswith("#"):
+                rows.append({"rule_type": default_rule_type, "word": word})
+    parsed = []
+    for item in rows:
+        word = str(item.get("word") or item.get("词条") or "").strip()
+        if not word:
+            continue
+        parsed.append(
+            {
+                "rule_type": normalize_rule_type(item.get("rule_type") or item.get("类型") or default_rule_type),
+                "word": word,
+                "risk_weight": float(item.get("risk_weight") or item.get("权重") or 0.1),
+                "enabled": int(item.get("enabled") if item.get("enabled") is not None else item.get("启用") if item.get("启用") is not None else 1),
+                "remark": str(item.get("remark") or item.get("备注") or "文件导入").strip(),
+            }
+        )
+    return parsed
+
+
+def api_import_rules(file_payload, default_rule_type="keyword"):
+    items = parse_rule_upload(file_payload, default_rule_type)
+    inserted = 0
+    skipped = 0
+    with db() as conn:
+        for item in items:
+            exists = conn.execute("SELECT 1 FROM rule_words WHERE rule_type=? AND word=?", (item["rule_type"], item["word"])).fetchone()
+            if exists:
+                skipped += 1
+                continue
+            conn.execute(
+                "INSERT INTO rule_words VALUES (?,?,?,?,?,?,?)",
+                (new_id("RW"), item["rule_type"], item["word"], item["risk_weight"], item["enabled"], item["remark"], now()),
+            )
+            inserted += 1
+    sync_rules_to_text_dictionaries()
+    return {"success": True, "inserted": inserted, "skipped": skipped, "parsed": len(items)}
 
 
 def api_update_rule(rule_id, payload):
@@ -1705,7 +2299,9 @@ def api_update_rule(rule_id, payload):
     args.append(rule_id)
     with db() as conn:
         conn.execute(f"UPDATE rule_words SET {','.join(sets)} WHERE id=?", args)
-        return row_to_dict(conn.execute("SELECT * FROM rule_words WHERE id=?", (rule_id,)).fetchone())
+        row = row_to_dict(conn.execute("SELECT * FROM rule_words WHERE id=?", (rule_id,)).fetchone())
+    sync_rules_to_text_dictionaries()
+    return row
 
 
 def api_reviews(qs):
@@ -1773,6 +2369,8 @@ def main():
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
     server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
     print(f"Demo server running: http://127.0.0.1:{port}")
+    # 启动即扫描历史未识别(pending)数据，后台线程依次自动识别
+    trigger_auto_recognize()
     server.serve_forever()
 
 
