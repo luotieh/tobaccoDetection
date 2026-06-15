@@ -55,7 +55,7 @@
 - **后续演进**：生产再升级到「用户表 + 登录 + 角色 + 审计」（方案 c / `NEXT_OPTIMIZATION_PLAN` 任务 4.1）。
 - **验收**：不带凭据访问代理端口返回 401；带正确账号密码可正常使用；8000 端口不直接对外暴露。
 
-### P0-6 关闭 Mock 误判（图像模态已落地真实模型）
+### P0-6 关闭 Mock 误判（图像、文本模态已落地真实模型）
 - **问题**：三服务默认开启 Mock fallback（`USE_MOCK_MODEL` / `ASR_ENGINE=mock`），异常时静默回退 mock，演示/试点易把「假命中」当真实结果。
 - **定位**：`.env` `TOBACCO_PROFILE=dev`；fallback 见 `app.py:849-865`（视觉→本地 YOLO→mock）、`1434-1456`（文本/语音→mock）。
 - **已完成（图像）**：接入本地训练模型 `tobacco-yolo11s`（`weights/best.pt`，单类 `cig_pack_or_carton`）。
@@ -63,8 +63,13 @@
   - 类别经 `normalize_class` 别名映射到 `cigarette_pack`；vision 与管理端两个模型注册表均已登记。
   - 实测：vision 以 `USE_MOCK_MODEL=false YOLO_MODEL_ID=tobacco-yolo11s` 启动，管理端上传返回 `service_mode=vision-service`、`detected=true`、`confidence≈0.85`，非 mock。
   - 启动命令（图像真实模式）：`USE_MOCK_MODEL=false YOLO_MODEL_ID=tobacco-yolo11s HOST=127.0.0.1 python3 -m uvicorn app.main:app --port 9000`。
-- **待办（文本/语音）**：如试点需要真实文本语义模型 / Whisper ASR，按同样思路关闭对应 mock 并就位权重；缺模型时**报错而非静默 mock**（对接 `NEXT_OPTIMIZATION_PLAN` 任务 1.1 / 2.3）。
-- **验收**：图像模态已满足（真实命中、非 mock、前端可见 `service_mode`）；文本/语音视试点范围决定是否同步切真实。
+- **已完成（文本）**：接入第三方 OpenAI 兼容 LLM（DeepSeek，`provider=openai_compatible`）做语义风险分类。
+  - 配置经管理端「文本 LLM 配置」写入并应用：`semantic_engine=llm`、`use_mock_model=false`，连通性走 `/api/text-llm-config/health-check`（实测 200），应用走 `/api/text-llm-config/apply-text-service`。
+  - 已持久化到本机 `.env`（`TEXT_SEMANTIC_ENGINE=llm` 等，含 API Key；`.env` 不入仓），`start_all.sh` 起来即真实模式。
+  - 实测：售烟文案→`high` 0.88（`sale_intent`/`trade_lead`/`contact_lead`/`price_quantity` 等）；控烟公益文案→`none` 0.0（`whitelist_context`），语义区分正确、非 mock。
+  - ⚠️ 运维注意：管理端 `apply-text-service` 会用 `sys.executable` 重启文本服务，故**管理端须用装有 uvicorn 的解释器启动**（系统 `python3`，即 `start_all.sh` 的方式），不要用缺 uvicorn 的 venv 启动管理端。
+- **待办（语音）**：如试点需要真实 Whisper ASR，按 `real` profile 关闭 `ASR_ENGINE=mock` 并就位 whisper 权重；缺模型时**报错而非静默 mock**（对接 `NEXT_OPTIMIZATION_PLAN` 任务 1.1 / 2.3）。
+- **验收**：图像、文本模态已满足（真实命中、非 mock、前端可见 `service_mode`/`engine`）；语音视试点范围决定是否同步切真实。
 
 ---
 
