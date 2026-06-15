@@ -46,6 +46,7 @@ class Settings:
     video_sample_fps: float = env_float("VIDEO_SAMPLE_FPS", 1.0)
     max_video_seconds: int = env_int("MAX_VIDEO_SECONDS", 180)
     max_evidence_frames: int = env_int("MAX_EVIDENCE_FRAMES", 10)
+    max_upload_mb: int = env_int("MAX_UPLOAD_MB", 200)
 
     upload_dir: Path = Path(os.environ.get("UPLOAD_DIR", "storage/uploads"))
     evidence_dir: Path = Path(os.environ.get("EVIDENCE_DIR", "storage/evidence"))

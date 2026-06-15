@@ -399,7 +399,7 @@ function contentsTable(rows) {
   return `<table>
     <thead><tr><th>编号</th><th>平台</th><th>类型</th><th>标题</th><th>账号</th><th>采集时间</th><th>识别</th><th>风险</th><th>审核</th><th>操作</th></tr></thead>
     <tbody>${rows.map(r => `<tr>
-      <td>${r.id}</td><td>${r.platform}</td><td>${r.content_type}</td><td class="title-cell" title="${escapeHtml(r.title || "")}">${escapeHtml(r.title || "")}</td><td>${r.account_name}</td><td>${r.collect_time}</td>
+      <td>${r.id}</td><td>${escapeHtml(r.platform)}</td><td>${escapeHtml(r.content_type)}</td><td class="title-cell" title="${escapeHtml(r.title || "")}">${escapeHtml(r.title || "")}</td><td>${escapeHtml(r.account_name)}</td><td>${escapeHtml(r.collect_time)}</td>
       <td>${statusTag(r.recognize_status)}</td><td>${riskTag(r.risk_level)} ${Number(r.risk_score || 0).toFixed(2)}</td><td>${statusTag(r.review_status)}</td>
       <td class="actions-cell">
         <button class="secondary" onclick="setRoute('detail/${r.id}')">查看</button>
@@ -410,25 +410,30 @@ function contentsTable(rows) {
   </table>`;
 }
 
-function contentsPager() {
-  const { page, page_size, total } = contentsState;
+// 通用分页条：state 含 {page,page_size,total}，gotoName/sizeName 为全局翻页函数名
+function pagerHtml(state, gotoName, sizeName) {
+  const { page, page_size, total } = state;
   const pages = Math.max(1, Math.ceil(total / page_size));
   const start = total ? (page - 1) * page_size + 1 : 0;
   const end = Math.min(total, page * page_size);
   return `<div class="pager">
     <span class="pager-info">共 ${total} 条，第 ${start}-${end} 条 / 第 ${page}/${pages} 页</span>
     <span class="pager-ctrl">
-      <button class="secondary" onclick="gotoContentsPage(1)" ${page <= 1 ? "disabled" : ""}>首页</button>
-      <button class="secondary" onclick="gotoContentsPage(${page - 1})" ${page <= 1 ? "disabled" : ""}>上一页</button>
-      <button class="secondary" onclick="gotoContentsPage(${page + 1})" ${page >= pages ? "disabled" : ""}>下一页</button>
-      <button class="secondary" onclick="gotoContentsPage(${pages})" ${page >= pages ? "disabled" : ""}>末页</button>
+      <button class="secondary" onclick="${gotoName}(1)" ${page <= 1 ? "disabled" : ""}>首页</button>
+      <button class="secondary" onclick="${gotoName}(${page - 1})" ${page <= 1 ? "disabled" : ""}>上一页</button>
+      <button class="secondary" onclick="${gotoName}(${page + 1})" ${page >= pages ? "disabled" : ""}>下一页</button>
+      <button class="secondary" onclick="${gotoName}(${pages})" ${page >= pages ? "disabled" : ""}>末页</button>
       <label class="pager-size"><span>每页</span>
-        <select onchange="changeContentsPageSize(this.value)">
+        <select onchange="${sizeName}(this.value)">
           ${[10, 20, 50, 100].map(n => `<option value="${n}" ${n === page_size ? "selected" : ""}>${n}</option>`).join("")}
         </select>
       </label>
     </span>
   </div>`;
+}
+
+function contentsPager() {
+  return pagerHtml(contentsState, "gotoContentsPage", "changeContentsPageSize");
 }
 
 async function gotoContentsPage(page) {
@@ -780,15 +785,15 @@ async function queuePush(id) {
 async function renderModels() {
   const rows = await api("/api/models");
   $("#view").innerHTML = `<div class="table-wrap"><table><thead><tr><th>模型编号</th><th>名称</th><th>类型</th><th>版本</th><th>接口</th><th>阈值</th><th>超时</th><th>状态</th><th>操作</th></tr></thead>
-    <tbody>${rows.map(r => `<tr><td>${r.id}</td><td>${r.model_name}</td><td>${r.model_type}</td><td>${r.model_version}</td><td>${r.endpoint}</td><td>${r.threshold}</td><td>${r.timeout}s</td><td>${r.enabled ? statusTag("enabled") : statusTag("disabled")}</td><td><button class="secondary" onclick='editModel(${JSON.stringify(r)})'>编辑</button></td></tr>`).join("")}</tbody></table></div>`;
+    <tbody>${rows.map(r => `<tr><td>${r.id}</td><td>${escapeHtml(r.model_name)}</td><td>${escapeHtml(r.model_type)}</td><td>${escapeHtml(r.model_version)}</td><td>${escapeHtml(r.endpoint)}</td><td>${r.threshold}</td><td>${r.timeout}s</td><td>${r.enabled ? statusTag("enabled") : statusTag("disabled")}</td><td><button class="secondary" onclick='editModel(${escapeHtml(JSON.stringify(r))})'>编辑</button></td></tr>`).join("")}</tbody></table></div>`;
 }
 
 function editModel(r) {
   openModal(`<h3>编辑模型配置</h3><div class="form-grid">
-    <label><span>模型名称</span><input id="m_name" value="${r.model_name}"></label><label><span>版本</span><input id="m_ver" value="${r.model_version}"></label>
-    <label class="full"><span>接口地址</span><input id="m_endpoint" value="${r.endpoint}"></label><label><span>阈值</span><input id="m_threshold" type="number" step="0.01" value="${r.threshold}"></label>
+    <label><span>模型名称</span><input id="m_name" value="${escapeHtml(r.model_name)}"></label><label><span>版本</span><input id="m_ver" value="${escapeHtml(r.model_version)}"></label>
+    <label class="full"><span>接口地址</span><input id="m_endpoint" value="${escapeHtml(r.endpoint)}"></label><label><span>阈值</span><input id="m_threshold" type="number" step="0.01" value="${r.threshold}"></label>
     <label><span>超时秒数</span><input id="m_timeout" type="number" value="${r.timeout}"></label><label><span>启用</span><select id="m_enabled"><option value="1">启用</option><option value="0">停用</option></select></label>
-    <label class="full"><span>说明</span><textarea id="m_desc">${r.description || ""}</textarea></label>
+    <label class="full"><span>说明</span><textarea id="m_desc">${escapeHtml(r.description || "")}</textarea></label>
   </div><div class="dialog-actions"><button class="secondary" onclick="closeModal()">取消</button><button onclick="saveModel('${r.id}')">保存</button></div>`);
   $("#m_enabled").value = String(r.enabled);
 }
@@ -982,33 +987,60 @@ async function saveFusion() {
   toast("融合配置已保存");
 }
 
+const rulesState = { page: 1, page_size: 20, total: 0 };
+
+async function loadRules() {
+  const params = new URLSearchParams();
+  if ($("#ruleFilter")?.value) params.set("rule_type", $("#ruleFilter").value);
+  params.set("page", rulesState.page);
+  params.set("page_size", rulesState.page_size);
+  const data = await api(`/api/rules?${params.toString()}`);
+  rulesState.total = data.total;
+  rulesState.page = data.page;
+  rulesState.page_size = data.page_size;
+  const wrap = $(".table-wrap");
+  if (wrap) wrap.innerHTML = rulesTable(data.items) + pagerHtml(rulesState, "gotoRulesPage", "changeRulesPageSize");
+}
+
+async function gotoRulesPage(page) {
+  const pages = Math.max(1, Math.ceil(rulesState.total / rulesState.page_size));
+  rulesState.page = Math.max(1, Math.min(pages, page));
+  await loadRules();
+}
+
+async function changeRulesPageSize(size) {
+  rulesState.page_size = Number(size) || 20;
+  rulesState.page = 1;
+  await loadRules();
+}
+
 async function renderRules() {
-  const rows = await api("/api/rules");
+  rulesState.page = 1;
   $("#view").innerHTML = `<div class="toolbar"><div><label><span>词库类型</span><select id="ruleFilter"><option value="">全部</option><option value="keyword">关键词</option><option value="blackword">黑话</option><option value="brand">品牌词</option><option value="whitelist">白名单</option><option value="region">地域词</option></select></label></div><div class="actions"><button onclick="filterRules()">查询</button><button class="secondary" onclick="openRuleForm()">新增词条</button></div></div>
     <div class="panel"><h3 class="section-title">上传文件导入</h3><div class="form-grid">
       <label><span>导入类型</span><select id="ruleImportType"><option value="keyword">关键词</option><option value="blackword">黑话</option><option value="brand">品牌词</option><option value="whitelist">白名单</option><option value="region">地域词</option></select></label>
       <label class="full"><span>规则文件</span><input id="ruleImportFile" type="file" accept=".txt,.csv,.json"></label>
     </div><div class="dialog-actions"><button class="secondary" onclick="importRulesFile()">上传并识别规则</button></div><div id="ruleImportResult" class="result-box pre">支持 txt 每行一个词，csv 字段 rule_type,word,risk_weight,remark,enabled，json 数组或对象分组。</div></div>
-    <div class="table-wrap">${rulesTable(rows)}</div>`;
+    <div class="table-wrap"></div>`;
+  await loadRules();
 }
 
 function rulesTable(rows) {
-  return `<table><thead><tr><th>编号</th><th>类型</th><th>词条</th><th>权重</th><th>状态</th><th>备注</th><th>操作</th></tr></thead><tbody>${rows.map(r => `<tr><td>${r.id}</td><td>${r.rule_type}</td><td>${r.word}</td><td>${r.risk_weight}</td><td>${r.enabled ? "启用" : "停用"}</td><td>${r.remark || ""}</td><td class="actions-cell"><button class="secondary" onclick='openRuleForm(${JSON.stringify(r)})'>编辑</button><button class="danger" onclick="deleteRule('${r.id}')">删除</button></td></tr>`).join("")}</tbody></table>`;
+  return `<table><thead><tr><th>编号</th><th>类型</th><th>词条</th><th>权重</th><th>状态</th><th>备注</th><th>操作</th></tr></thead><tbody>${rows.map(r => `<tr><td>${r.id}</td><td>${escapeHtml(r.rule_type)}</td><td>${escapeHtml(r.word)}</td><td>${r.risk_weight}</td><td>${r.enabled ? "启用" : "停用"}</td><td>${escapeHtml(r.remark || "")}</td><td class="actions-cell"><button class="secondary" onclick='openRuleForm(${escapeHtml(JSON.stringify(r))})'>编辑</button><button class="danger" onclick="deleteRule('${r.id}')">删除</button></td></tr>`).join("")}</tbody></table>`;
 }
 
 async function filterRules() {
-  const type = $("#ruleFilter").value;
-  const rows = await api(`/api/rules${type ? "?rule_type=" + type : ""}`);
-  $(".table-wrap").innerHTML = rulesTable(rows);
+  rulesState.page = 1;
+  await loadRules();
 }
 
 function openRuleForm(r = {}) {
   openModal(`<h3>${r.id ? "编辑" : "新增"}词条</h3><div class="form-grid">
     <label><span>类型</span><select id="r_type"><option value="keyword">关键词</option><option value="blackword">黑话</option><option value="brand">品牌词</option><option value="whitelist">白名单</option><option value="region">地域词</option></select></label>
-    <label><span>词条</span><input id="r_word" value="${r.word || ""}"></label>
+    <label><span>词条</span><input id="r_word" value="${escapeHtml(r.word || "")}"></label>
     <label><span>权重</span><input id="r_weight" type="number" step="0.01" value="${r.risk_weight ?? 0.1}"></label>
     <label><span>启用</span><select id="r_enabled"><option value="1">启用</option><option value="0">停用</option></select></label>
-    <label class="full"><span>备注</span><textarea id="r_remark">${r.remark || ""}</textarea></label>
+    <label class="full"><span>备注</span><textarea id="r_remark">${escapeHtml(r.remark || "")}</textarea></label>
   </div><div class="dialog-actions"><button class="secondary" onclick="closeModal()">取消</button><button onclick="saveRule('${r.id || ""}')">保存</button></div>`);
   $("#r_type").value = r.rule_type || "keyword";
   $("#r_enabled").value = String(r.enabled ?? 1);
@@ -1046,20 +1078,76 @@ async function importRulesFile() {
   }
 }
 
+const reviewsState = { page: 1, page_size: 20, total: 0 };
+
+function reviewsTable(rows) {
+  return `<table><thead><tr><th>内容编号</th><th>平台</th><th>标题</th><th>风险分</th><th>风险等级</th><th>审核状态</th><th>审核人</th><th>审核时间</th><th>操作</th></tr></thead><tbody>${rows.map(r => `<tr><td>${r.content_id}</td><td>${escapeHtml(r.platform)}</td><td>${escapeHtml(r.title || "")}</td><td>${Number(r.risk_score || 0).toFixed(2)}</td><td>${riskTag(r.risk_level)}</td><td>${statusTag(r.review_status)}</td><td>${escapeHtml(r.reviewer || "-")}</td><td>${escapeHtml(r.review_time || "-")}</td><td class="actions-cell"><button class="secondary" onclick="setRoute('detail/${r.content_id}')">查看</button><button onclick="openReview('${r.content_id}')">审核</button></td></tr>`).join("")}</tbody></table>`;
+}
+
+async function loadReviews() {
+  const data = await api(`/api/reviews?page=${reviewsState.page}&page_size=${reviewsState.page_size}`);
+  reviewsState.total = data.total;
+  reviewsState.page = data.page;
+  reviewsState.page_size = data.page_size;
+  const wrap = $(".table-wrap");
+  if (wrap) wrap.innerHTML = reviewsTable(data.items) + pagerHtml(reviewsState, "gotoReviewsPage", "changeReviewsPageSize");
+}
+
+async function gotoReviewsPage(page) {
+  const pages = Math.max(1, Math.ceil(reviewsState.total / reviewsState.page_size));
+  reviewsState.page = Math.max(1, Math.min(pages, page));
+  await loadReviews();
+}
+
+async function changeReviewsPageSize(size) {
+  reviewsState.page_size = Number(size) || 20;
+  reviewsState.page = 1;
+  await loadReviews();
+}
+
 async function renderReviews() {
-  const rows = await api("/api/reviews");
-  $("#view").innerHTML = `<div class="table-wrap"><table><thead><tr><th>内容编号</th><th>平台</th><th>标题</th><th>风险分</th><th>风险等级</th><th>审核状态</th><th>审核人</th><th>审核时间</th><th>操作</th></tr></thead><tbody>${rows.map(r => `<tr><td>${r.content_id}</td><td>${r.platform}</td><td>${r.title}</td><td>${Number(r.risk_score || 0).toFixed(2)}</td><td>${riskTag(r.risk_level)}</td><td>${statusTag(r.review_status)}</td><td>${r.reviewer || "-"}</td><td>${r.review_time || "-"}</td><td class="actions-cell"><button class="secondary" onclick="setRoute('detail/${r.content_id}')">查看</button><button onclick="openReview('${r.content_id}')">审核</button></td></tr>`).join("")}</tbody></table></div>`;
+  reviewsState.page = 1;
+  $("#view").innerHTML = `<div class="table-wrap"></div>`;
+  await loadReviews();
+}
+
+const pushState = { page: 1, page_size: 20, total: 0 };
+
+function pushTable(rows) {
+  return `<table><thead><tr><th>推送编号</th><th>内容编号</th><th>标题</th><th>风险等级</th><th>报告编号</th><th>状态</th><th>推送时间</th><th>重试</th><th>错误</th><th>操作</th></tr></thead><tbody>${rows.map(r => `<tr><td>${r.id}</td><td>${r.content_id}</td><td>${escapeHtml(r.title || "")}</td><td>${riskTag(r.risk_level)}</td><td>${escapeHtml(r.report_id || "-")}</td><td>${statusTag(r.push_status)}</td><td>${escapeHtml(r.push_time || "-")}</td><td>${r.retry_count}</td><td>${escapeHtml(r.error_message || "")}</td><td><button onclick="sendPush('${r.id}')">推送监管平台</button></td></tr>`).join("")}</tbody></table>`;
+}
+
+async function loadPush() {
+  const data = await api(`/api/push?page=${pushState.page}&page_size=${pushState.page_size}`);
+  pushState.total = data.total;
+  pushState.page = data.page;
+  pushState.page_size = data.page_size;
+  const wrap = $(".table-wrap");
+  if (wrap) wrap.innerHTML = pushTable(data.items) + pagerHtml(pushState, "gotoPushPage", "changePushPageSize");
+}
+
+async function gotoPushPage(page) {
+  const pages = Math.max(1, Math.ceil(pushState.total / pushState.page_size));
+  pushState.page = Math.max(1, Math.min(pages, page));
+  await loadPush();
+}
+
+async function changePushPageSize(size) {
+  pushState.page_size = Number(size) || 20;
+  pushState.page = 1;
+  await loadPush();
 }
 
 async function renderPush() {
-  const rows = await api("/api/push");
-  $("#view").innerHTML = `<div class="table-wrap"><table><thead><tr><th>推送编号</th><th>内容编号</th><th>标题</th><th>风险等级</th><th>报告编号</th><th>状态</th><th>推送时间</th><th>重试</th><th>错误</th><th>操作</th></tr></thead><tbody>${rows.map(r => `<tr><td>${r.id}</td><td>${r.content_id}</td><td>${r.title || ""}</td><td>${riskTag(r.risk_level)}</td><td>${r.report_id || "-"}</td><td>${statusTag(r.push_status)}</td><td>${r.push_time || "-"}</td><td>${r.retry_count}</td><td>${r.error_message || ""}</td><td><button onclick="sendPush('${r.id}')">推送监管平台</button></td></tr>`).join("")}</tbody></table></div>
+  pushState.page = 1;
+  $("#view").innerHTML = `<div class="table-wrap"></div>
     <div class="panel"><h3 class="section-title">说明</h3><p class="pre">在内容详情页或审核后可将确认线索加入推送队列。本页调用 Mock 监管平台接口，随机返回推送成功或超时失败，失败记录可再次重试。</p></div>`;
+  await loadPush();
 }
 
 async function sendPush(id) {
   await api(`/api/push/${id}/send`, { method: "POST", body: {} });
-  toast("推送动作已完成"); renderPush();
+  toast("推送动作已完成"); await loadPush();
 }
 
 function renderUsers() {

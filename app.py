@@ -48,7 +48,13 @@ VISION_SERVICE_URL = os.environ.get("VISION_SERVICE_URL", "http://127.0.0.1:9000
 TEXT_SERVICE_URL = os.environ.get("TEXT_SERVICE_URL", "http://127.0.0.1:8010")
 AUDIO_SERVICE_URL = os.environ.get("AUDIO_SERVICE_URL", "http://127.0.0.1:8020")
 AUTO_RECOGNIZE = os.environ.get("AUTO_RECOGNIZE", "true").strip().lower() not in {"0", "false", "no", "off"}
+MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "200"))
+MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 _YOLO_MODELS = {}
+
+
+class PayloadTooLarge(Exception):
+    """请求体超过 MAX_UPLOAD_BYTES 上限。"""
 
 
 def now():
@@ -1640,14 +1646,20 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
-    def body_json(self):
+    def _content_length(self):
         length = int(self.headers.get("Content-Length") or 0)
+        if length > MAX_UPLOAD_BYTES:
+            raise PayloadTooLarge("请求体过大，超过上限 %d MB" % MAX_UPLOAD_MB)
+        return length
+
+    def body_json(self):
+        length = self._content_length()
         if length == 0:
             return {}
         return json.loads(self.rfile.read(length).decode("utf-8"))
 
     def read_multipart_form(self):
-        length = int(self.headers.get("Content-Length") or 0)
+        length = self._content_length()
         body = self.rfile.read(length) if length > 0 else b""
         return parse_multipart_form(body, self.headers.get("Content-Type", ""))
 
@@ -1737,6 +1749,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/push":
                 return self.send_json(api_push(qs))
             return self.send_json({"error": "not found"}, 404)
+        except PayloadTooLarge as exc:
+            return self.send_json({"error": str(exc)}, 413)
         except Exception as exc:
             return self.send_json({"error": str(exc)}, 500)
 
@@ -1802,6 +1816,8 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/mock/regulatory-platform/push":
                 return self.send_json(mock_regulatory_push())
             return self.send_json({"error": "not found"}, 404)
+        except PayloadTooLarge as exc:
+            return self.send_json({"error": str(exc)}, 413)
         except Exception as exc:
             return self.send_json({"error": str(exc)}, 500)
 
@@ -1820,6 +1836,8 @@ class Handler(BaseHTTPRequestHandler):
             if m := re.match(r"^/api/rules/([^/]+)$", path):
                 return self.send_json(api_update_rule(m.group(1), payload))
             return self.send_json({"error": "not found"}, 404)
+        except PayloadTooLarge as exc:
+            return self.send_json({"error": str(exc)}, 413)
         except Exception as exc:
             return self.send_json({"error": str(exc)}, 500)
 
@@ -1838,36 +1856,64 @@ class Handler(BaseHTTPRequestHandler):
                 sync_rules_to_text_dictionaries()
                 return self.send_json({"success": True})
             return self.send_json({"error": "not found"}, 404)
+        except PayloadTooLarge as exc:
+            return self.send_json({"error": str(exc)}, 413)
         except Exception as exc:
             return self.send_json({"error": str(exc)}, 500)
 
 
 def api_dashboard():
+    today = datetime.now().strftime("%Y-%m-%d")
+    week_ago = (datetime.now() - timedelta(days=6)).strftime("%Y-%m-%d")
     with db() as conn:
-        contents = rows_to_list(conn.execute("SELECT * FROM content_items").fetchall())
-        pushes = rows_to_list(conn.execute("SELECT * FROM push_logs").fetchall())
+        def scalar(sql, args=()):
+            return conn.execute(sql, args).fetchone()[0]
+        total = scalar("SELECT COUNT(*) FROM content_items")
+        today_count = scalar("SELECT COUNT(*) FROM content_items WHERE collect_time LIKE ?", (today + "%",))
+        completed = scalar("SELECT COUNT(*) FROM content_items WHERE recognize_status='completed'")
+        high_risk = scalar("SELECT COUNT(*) FROM content_items WHERE risk_level='高风险'")
+        pending_review = scalar("SELECT COUNT(*) FROM content_items WHERE review_status='pending'")
+        confirmed = scalar("SELECT COUNT(*) FROM content_items WHERE review_status='confirmed'")
+        push_success = scalar("SELECT COUNT(*) FROM push_logs WHERE push_status='success'")
         platform_rows = rows_to_list(conn.execute("SELECT platform name, COUNT(*) value FROM content_items GROUP BY platform").fetchall())
         risk_rows = rows_to_list(conn.execute("SELECT risk_level name, COUNT(*) value FROM content_items GROUP BY risk_level").fetchall())
         modality_rows = rows_to_list(conn.execute("SELECT model_type name, COUNT(*) value FROM recognition_results WHERE risk_score>=0.65 GROUP BY model_type").fetchall())
-    today = datetime.now().strftime("%Y-%m-%d")
+        trend_rows = conn.execute(
+            "SELECT substr(collect_time,1,10) d, COUNT(*) c FROM content_items WHERE substr(collect_time,1,10) >= ? GROUP BY d",
+            (week_ago,),
+        ).fetchall()
+    # 近7日真实采集量（无数据的日期补 0），不再使用随机示意值
+    trend_map = {row[0]: row[1] for row in trend_rows}
     trend = []
     for i in range(6, -1, -1):
-        day = (datetime.now() - timedelta(days=i)).strftime("%m-%d")
-        trend.append({"name": day, "value": random.randint(4, 18)})
+        day = datetime.now() - timedelta(days=i)
+        trend.append({"name": day.strftime("%m-%d"), "value": trend_map.get(day.strftime("%Y-%m-%d"), 0)})
     return {
         "cards": {
-            "今日采集内容数": sum(1 for c in contents if c["collect_time"].startswith(today)) or len(contents),
-            "已完成识别数": sum(1 for c in contents if c["recognize_status"] == "completed"),
-            "高风险线索数": sum(1 for c in contents if c["risk_level"] == "高风险"),
-            "待人工审核数": sum(1 for c in contents if c["review_status"] == "pending"),
-            "已确认线索数": sum(1 for c in contents if c["review_status"] == "confirmed"),
-            "推送成功数": sum(1 for p in pushes if p["push_status"] == "success"),
+            "今日采集内容数": today_count or total,
+            "已完成识别数": completed,
+            "高风险线索数": high_risk,
+            "待人工审核数": pending_review,
+            "已确认线索数": confirmed,
+            "推送成功数": push_success,
         },
         "platforms": platform_rows,
         "risks": risk_rows,
         "modalities": modality_rows,
         "trend": trend,
     }
+
+
+def pagination_params(qs, default_size=20, max_size=200):
+    """从查询串解析分页参数，返回 (page, page_size, offset)，越界自动钳制。"""
+    def _int(value, default, lo, hi):
+        try:
+            return max(lo, min(hi, int(value)))
+        except (TypeError, ValueError):
+            return default
+    page = _int(qs.get("page"), 1, 1, 1_000_000)
+    page_size = _int(qs.get("page_size"), default_size, 1, max_size)
+    return page, page_size, (page - 1) * page_size
 
 
 def api_contents(qs):
@@ -1882,15 +1928,7 @@ def api_contents(qs):
         kw = f"%{qs['keyword']}%"
         args.extend([kw, kw, kw])
 
-    def parse_int(value, default, lo, hi):
-        try:
-            return max(lo, min(hi, int(value)))
-        except (TypeError, ValueError):
-            return default
-
-    page = parse_int(qs.get("page"), 1, 1, 1_000_000)
-    page_size = parse_int(qs.get("page_size"), 20, 1, 200)
-    offset = (page - 1) * page_size
+    page, page_size, offset = pagination_params(qs)
 
     with db() as conn:
         total = conn.execute("SELECT COUNT(*) FROM content_items" + where, args).fetchone()[0]
@@ -2175,14 +2213,19 @@ def api_update_fusion(payload):
 
 
 def api_rules(qs):
-    sql = "SELECT * FROM rule_words WHERE 1=1"
+    where = " WHERE 1=1"
     args = []
     if qs.get("rule_type"):
-        sql += " AND rule_type=?"
+        where += " AND rule_type=?"
         args.append(qs["rule_type"])
-    sql += " ORDER BY rule_type, created_at DESC"
+    page, page_size, offset = pagination_params(qs)
     with db() as conn:
-        return rows_to_list(conn.execute(sql, args).fetchall())
+        total = conn.execute("SELECT COUNT(*) FROM rule_words" + where, args).fetchone()[0]
+        rows = rows_to_list(conn.execute(
+            "SELECT * FROM rule_words" + where + " ORDER BY rule_type, created_at DESC LIMIT ? OFFSET ?",
+            args + [page_size, offset],
+        ).fetchall())
+    return {"items": rows, "total": total, "page": page, "page_size": page_size}
 
 
 def sync_rules_to_text_dictionaries():
@@ -2321,17 +2364,20 @@ def api_update_rule(rule_id, payload):
 
 def api_reviews(qs):
     status = qs.get("review_status")
-    sql = """SELECT c.id content_id,c.platform,c.title,c.risk_score,c.risk_level,c.review_status,
-             rr.id review_id,rr.reviewer,rr.review_time,rr.review_opinion
-             FROM content_items c LEFT JOIN review_records rr ON rr.content_id=c.id
-             WHERE c.risk_level IN ('高风险','中风险')"""
+    where = " WHERE c.risk_level IN ('高风险','中风险')"
     args = []
     if status:
-        sql += " AND c.review_status=?"
+        where += " AND c.review_status=?"
         args.append(status)
-    sql += " GROUP BY c.id ORDER BY c.risk_score DESC"
+    sql = ("""SELECT c.id content_id,c.platform,c.title,c.risk_score,c.risk_level,c.review_status,
+             rr.id review_id,rr.reviewer,rr.review_time,rr.review_opinion
+             FROM content_items c LEFT JOIN review_records rr ON rr.content_id=c.id"""
+           + where + " GROUP BY c.id ORDER BY c.risk_score DESC LIMIT ? OFFSET ?")
+    page, page_size, offset = pagination_params(qs)
     with db() as conn:
-        return rows_to_list(conn.execute(sql, args).fetchall())
+        total = conn.execute("SELECT COUNT(*) FROM content_items c" + where, args).fetchone()[0]
+        rows = rows_to_list(conn.execute(sql, args + [page_size, offset]).fetchall())
+    return {"items": rows, "total": total, "page": page, "page_size": page_size}
 
 
 def api_review(content_id, payload):
@@ -2344,9 +2390,13 @@ def api_review(content_id, payload):
 
 
 def api_push(qs):
+    page, page_size, offset = pagination_params(qs)
     with db() as conn:
-        return rows_to_list(conn.execute("""SELECT p.*,c.title,c.platform,c.risk_level FROM push_logs p
-            LEFT JOIN content_items c ON c.id=p.content_id ORDER BY COALESCE(p.push_time,''), p.id DESC""").fetchall())
+        total = conn.execute("SELECT COUNT(*) FROM push_logs").fetchone()[0]
+        rows = rows_to_list(conn.execute("""SELECT p.*,c.title,c.platform,c.risk_level FROM push_logs p
+            LEFT JOIN content_items c ON c.id=p.content_id ORDER BY COALESCE(p.push_time,''), p.id DESC LIMIT ? OFFSET ?""",
+            (page_size, offset)).fetchall())
+    return {"items": rows, "total": total, "page": page, "page_size": page_size}
 
 
 def api_create_push(content_id):
