@@ -159,12 +159,38 @@ async function renderContents() {
       <div><label><span>平台</span><select id="platform">${platformOpts}</select></label></div>
       <div><label><span>内容类型</span><select id="ctype">${ctypeOpts}</select></label></div>
       <div><label><span>风险等级</span><select id="risk"><option value="">全部</option><option>高风险</option><option>中风险</option><option>低风险</option><option>无风险</option></select></label></div>
-      <div class="actions"><button onclick="filterContents()">查询</button><button class="secondary" onclick="openContentForm()">新增内容</button><button class="secondary" id="rerecogBtn" onclick="rerecognizeAll()">重新识别全部</button></div>
+      <div class="actions"><button onclick="filterContents()">查询</button><button class="secondary" onclick="openContentForm()">新增内容</button><button class="secondary" id="rerecogBtn" onclick="rerecognizeAll()">重新识别全部</button><button class="secondary" id="repushBtn" onclick="repushConfirmed()">补推已确认线索</button></div>
     </div>
     <div class="table-wrap"></div>
   `;
   await loadContents();
   pollRerecognize(false);
+  pollRepush(false);
+}
+
+async function repushConfirmed() {
+  if (!confirm("将对所有“已确认”内容按当前评论分重新推送发帖人与高风险评论账号到爬虫端。确定？")) return;
+  try {
+    const res = await api("/api/contents/repush-confirmed", { method: "POST", body: {} });
+    toast(res.message || "已开始补推");
+    pollRepush(true);
+  } catch (e) { toast("启动失败：" + e.message); }
+}
+
+async function pollRepush(announceDone) {
+  let data;
+  try { data = await api("/api/contents/repush-confirmed"); } catch (e) { return; }
+  const s = data.state || {};
+  const btn = $("#repushBtn");
+  if (s.running) {
+    if (btn) { btn.disabled = true; btn.textContent = `补推中 ${s.done}/${s.total}`; }
+    setTimeout(() => pollRepush(true), 3000);
+  } else {
+    if (btn) { btn.disabled = false; btn.textContent = "补推已确认线索"; }
+    if (announceDone && s.total) {
+      toast(`补推完成 ${s.done}/${s.total}：发帖人 ${s.pushed_authors}，评论用户 ${s.pushed_comment_users}${s.failed ? `，失败 ${s.failed}` : ""}`);
+    }
+  }
 }
 
 async function rerecognizeAll() {

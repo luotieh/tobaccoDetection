@@ -1676,6 +1676,44 @@ def trigger_rerecognize_all():
     return {"started": True, "message": "已开始后台重识别所有内容", "state": dict(_rerecognize_state)}
 
 
+_repush_lock = threading.Lock()
+_repush_thread = None
+_repush_state = {"running": False, "total": 0, "done": 0, "failed": 0, "pushed_authors": 0, "pushed_comment_users": 0, "started_at": "", "finished_at": ""}
+
+
+def _repush_confirmed_worker():
+    """后台对所有已确认(confirmed)内容按当前评论分补推：发帖人 + 评论区高风险用户。"""
+    with db() as conn:
+        rows = rows_to_list(conn.execute("SELECT id FROM content_items WHERE review_status='confirmed' ORDER BY collect_time").fetchall())
+    _repush_state.update({"running": True, "total": len(rows), "done": 0, "failed": 0, "pushed_authors": 0, "pushed_comment_users": 0, "started_at": now(), "finished_at": ""})
+    for row in rows:
+        try:
+            with db() as conn:
+                content = row_to_dict(conn.execute("SELECT * FROM content_items WHERE id=?", (row["id"],)).fetchone())
+            if not content:
+                continue
+            if feedback_high_risk_account(content).get("ok"):
+                _repush_state["pushed_authors"] += 1
+            comment_fbs = feedback_high_risk_comment_users(content)
+            _repush_state["pushed_comment_users"] += sum(1 for c in comment_fbs if c.get("ok"))
+            _repush_state["done"] += 1
+        except Exception as exc:
+            _repush_state["failed"] += 1
+            sys.stderr.write("[repush-confirmed] %s 补推失败: %s\n" % (row["id"], exc))
+    _repush_state.update({"running": False, "finished_at": now()})
+
+
+def trigger_repush_confirmed():
+    """启动后台补推已确认线索；已在跑则返回当前进度。"""
+    global _repush_thread
+    with _repush_lock:
+        if _repush_thread is not None and _repush_thread.is_alive():
+            return {"started": False, "message": "补推正在进行中", "state": dict(_repush_state)}
+        _repush_thread = threading.Thread(target=_repush_confirmed_worker, name="repush-confirmed", daemon=True)
+        _repush_thread.start()
+    return {"started": True, "message": "已开始后台补推已确认线索", "state": dict(_repush_state)}
+
+
 def get_content_detail(content_id):
     with db() as conn:
         content = row_to_dict(conn.execute("SELECT * FROM content_items WHERE id=?", (content_id,)).fetchone())
@@ -1857,6 +1895,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(api_content_facets())
             if path == "/api/contents/recognize-all":
                 return self.send_json({"state": dict(_rerecognize_state)})
+            if path == "/api/contents/repush-confirmed":
+                return self.send_json({"state": dict(_repush_state)})
             if m := re.match(r"^/api/contents/([^/]+)/comment-feedback$", path):
                 preview = comment_feedback_preview(m.group(1))
                 return self.send_json(preview or {"error": "not found"}, 200 if preview else 404)
@@ -1925,6 +1965,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(content, 201)
             if path == "/api/contents/recognize-all":
                 return self.send_json(trigger_rerecognize_all())
+            if path == "/api/contents/repush-confirmed":
+                return self.send_json(trigger_repush_confirmed())
             if path == "/api/crawler/push":
                 result = api_crawler_push(payload)
                 if result.get("created"):
