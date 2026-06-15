@@ -209,6 +209,11 @@ td { color: #26364d; }
   -webkit-backdrop-filter: blur(18px) saturate(155%);
 }
 .title-cell { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.comment-risk { display: inline-block; margin-left: 8px; padding: 1px 7px; border-radius: 999px; font-size: 11px; border: 1px solid transparent; }
+.comment-risk.high { color: var(--red); background: rgba(255,240,240,.85); border-color: rgba(183,45,45,.25); }
+.comment-risk.mid { color: var(--orange); background: rgba(255,247,232,.85); border-color: rgba(199,163,75,.34); }
+.comment-risk.low { color: var(--gray); background: rgba(242,244,246,.8); border-color: rgba(122,132,145,.2); }
+.comment-risk.none { color: var(--gray); background: rgba(242,244,246,.6); border-color: rgba(122,132,145,.18); }
 .pager { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-top: 14px; font-size: 13px; color: var(--gray); }
 .pager-ctrl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .pager-ctrl button:disabled { opacity: .45; cursor: not-allowed; }

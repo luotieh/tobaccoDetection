@@ -1857,6 +1857,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(api_content_facets())
             if path == "/api/contents/recognize-all":
                 return self.send_json({"state": dict(_rerecognize_state)})
+            if m := re.match(r"^/api/contents/([^/]+)/comment-feedback$", path):
+                preview = comment_feedback_preview(m.group(1))
+                return self.send_json(preview or {"error": "not found"}, 200 if preview else 404)
             if m := re.match(r"^/api/contents/([^/]+)$", path):
                 detail = get_content_detail(m.group(1))
                 return self.send_json(detail or {"error": "not found"}, 200 if detail else 404)
@@ -2570,9 +2573,89 @@ def feedback_high_risk_account(content):
 
 
 def comment_sender_user_id(sender):
-    if isinstance(sender, dict):
-        return first_text(sender.get("id"), sender.get("uid"), sender.get("user_id"))
-    return ""
+    if not isinstance(sender, dict):
+        return ""
+    uid = first_text(
+        sender.get("id"), sender.get("uid"), sender.get("user_id"), sender.get("userId"),
+        sender.get("secUid"), sender.get("sec_uid"), sender.get("uin"), sender.get("userID"),
+        sender.get("authorId"), sender.get("author_id"),
+    )
+    if uid:
+        return uid
+    # 兼容嵌套结构，如 sender.user.id
+    nested = sender.get("user") if isinstance(sender.get("user"), dict) else {}
+    return first_text(nested.get("id"), nested.get("uid"), nested.get("user_id"), nested.get("userId"))
+
+
+def comment_feedback_preview(content_id):
+    """诊断：列出该内容每条评论的用户id、风险分与是否会上报爬虫端及原因（不实际推送）。"""
+    with db() as conn:
+        content = row_to_dict(conn.execute("SELECT * FROM content_items WHERE id=?", (content_id,)).fetchone())
+        if not content:
+            return None
+        rows = rows_to_list(conn.execute(
+            "SELECT comment_type, sender_json, content, risk_score, risk_level, risk_updated_at FROM crawler_comments WHERE content_id=? ORDER BY date, id",
+            (content_id,),
+        ).fetchall())
+    author_id = crawler_account_user_id(content)
+    items = []
+    for row in rows:
+        sender = json_loads(row["sender_json"], {}) or {}
+        uid = comment_sender_user_id(sender)
+        score = float(row["risk_score"] or 0)
+        scored = bool(row["risk_updated_at"])
+        if not uid:
+            reason = "无可识别的评论用户ID(sender 缺 id/uid 等字段)"
+        elif not scored:
+            reason = "该评论尚未打分(需重新识别)"
+        elif uid == author_id:
+            reason = "与发帖人相同，已随发帖人反馈"
+        elif score < COMMENT_HIGH_RISK_THRESHOLD:
+            reason = f"风险分 {round(score,4)} < 阈值 {COMMENT_HIGH_RISK_THRESHOLD}"
+        else:
+            reason = "会上报"
+        items.append({
+            "level": "一级" if row["comment_type"] == "comment" else "二级",
+            "user_id": uid,
+            "nickname": sender.get("nickname") or sender.get("name"),
+            "risk_score": round(score, 4),
+            "risk_level": row["risk_level"],
+            "scored": scored,
+            "would_push": reason == "会上报",
+            "reason": reason,
+            "content": (row["content"] or "")[:80],
+            "sender_keys": sorted(sender.keys()) if isinstance(sender, dict) else [],
+        })
+    return {
+        "content_id": content_id,
+        "platform": content.get("platform"),
+        "author_id": author_id,
+        "threshold": COMMENT_HIGH_RISK_THRESHOLD,
+        "total_comments": len(items),
+        "would_push_count": sum(1 for it in items if it["would_push"]),
+        "comments": items,
+    }
+
+
+def ensure_comments_scored(content):
+    """确保评论已打分：存在未打分(risk_updated_at 为空)的评论时按需补分并落库。
+    兜底覆盖“评论后补、识别早于评分逻辑、审核早于异步评分完成”等导致漏分的情况。"""
+    content_id = content["id"]
+    with db() as conn:
+        unscored = conn.execute(
+            "SELECT COUNT(*) FROM crawler_comments WHERE content_id=? AND content<>'' AND (risk_updated_at IS NULL OR risk_updated_at='')",
+            (content_id,),
+        ).fetchone()[0]
+    if not unscored:
+        return
+    scores = score_content_comments(content)
+    if scores:
+        with db() as conn:
+            for comment_db_id, (c_score, c_level) in scores.items():
+                conn.execute(
+                    "UPDATE crawler_comments SET risk_score=?, risk_level=?, risk_updated_at=? WHERE id=?",
+                    (c_score, c_level, now(), comment_db_id),
+                )
 
 
 def feedback_high_risk_comment_users(content):
@@ -2581,6 +2664,7 @@ def feedback_high_risk_comment_users(content):
     content_id = content["id"]
     platform = content.get("platform") or ""
     author_id = crawler_account_user_id(content)
+    ensure_comments_scored(content)
     with db() as conn:
         rows = rows_to_list(conn.execute(
             "SELECT comment_type, sender_json, risk_score FROM crawler_comments WHERE content_id=? AND content<>''",

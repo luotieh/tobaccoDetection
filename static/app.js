@@ -744,6 +744,12 @@ function nestPhoneComments(comments = []) {
 function phoneCommentNode(comment, depth = 0) {
   const sender = comment.sender || {};
   const senderName = sender.nickname || sender.id || "匿名用户";
+  const rs = Number(comment.risk_score || 0);
+  const scored = !!comment.risk_updated_at;
+  const cls = rs >= 0.65 ? "high" : rs >= 0.4 ? "mid" : "low";
+  const riskBadge = scored
+    ? `<span class="comment-risk ${cls}" title="评论文本风险分；≥0.65 审核确认后反馈爬虫端">风险 ${rs.toFixed(2)}</span>`
+    : `<span class="comment-risk none" title="尚未打分，重新识别后生成">未打分</span>`;
   return `
     <div class="crawler-comment ${depth ? "reply" : ""}">
       ${phoneAvatar(sender.avatarUrl, senderName)}
@@ -751,6 +757,7 @@ function phoneCommentNode(comment, depth = 0) {
         <div class="crawler-comment-meta">
           <strong>${escapeHtml(senderName)}</strong>
           <span>${escapeHtml(comment.date || "-")}</span>
+          ${riskBadge}
         </div>
         <p>${escapeHtml(comment.content || "")}</p>
         ${comment.replies?.length ? `<div class="crawler-replies">${comment.replies.map(reply => phoneCommentNode(reply, depth + 1)).join("")}</div>` : ""}
