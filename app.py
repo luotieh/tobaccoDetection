@@ -55,6 +55,9 @@ VISION_SERVICE_URL = os.environ.get("VISION_SERVICE_URL", "http://127.0.0.1:9000
 TEXT_SERVICE_URL = os.environ.get("TEXT_SERVICE_URL", "http://127.0.0.1:8010")
 AUDIO_SERVICE_URL = os.environ.get("AUDIO_SERVICE_URL", "http://127.0.0.1:8020")
 AUTO_RECOGNIZE = os.environ.get("AUTO_RECOGNIZE", "true").strip().lower() not in {"0", "false", "no", "off"}
+# 高风险账户反馈爬虫端：IP/端口可配置，默认指向内网爬虫服务
+CRAWLER_RISK_API_BASE = os.environ.get("CRAWLER_RISK_API_BASE", "http://10.20.30.58:5001")
+CRAWLER_RISK_API_PATH = os.environ.get("CRAWLER_RISK_API_PATH", "/api/internal/users/risk-score")
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "200"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 _YOLO_MODELS = {}
@@ -2401,13 +2404,62 @@ def api_reviews(qs):
     return {"items": rows, "total": total, "page": page, "page_size": page_size}
 
 
+def crawler_account_user_id(content):
+    """从 author_json 提取平台用户ID，用于向爬虫端反馈账户风险。"""
+    author = json_loads(content.get("author_json"), {})
+    if isinstance(author, dict):
+        return first_text(author.get("id"), author.get("uid"), author.get("user_id"))
+    return ""
+
+
+def post_crawler_user_risk(platform, user_id, risk_score, timeout=5):
+    """向爬虫端反馈单个高风险账户：POST {platform,id,risk_score}。"""
+    body = json.dumps(
+        {"platform": platform, "id": user_id, "risk_score": round(float(risk_score or 0), 4)},
+        ensure_ascii=False,
+    ).encode("utf-8")
+    parsed = urlparse(CRAWLER_RISK_API_BASE)
+    conn_cls = http.client.HTTPSConnection if parsed.scheme == "https" else http.client.HTTPConnection
+    conn = conn_cls(parsed.hostname, parsed.port or (443 if parsed.scheme == "https" else 80), timeout=timeout)
+    try:
+        conn.request("POST", CRAWLER_RISK_API_PATH, body=body, headers={"Content-Type": "application/json"})
+        resp = conn.getresponse()
+        raw = resp.read().decode("utf-8", errors="replace")
+        return {"ok": 200 <= resp.status < 300, "status_code": resp.status, "response": raw[:300]}
+    finally:
+        conn.close()
+
+
+def feedback_high_risk_account(content):
+    """审核确认后把高风险账户(平台/用户id/风险分)反馈给爬虫端；尽力而为，失败不阻塞审核。"""
+    platform = content.get("platform") or ""
+    user_id = crawler_account_user_id(content)
+    risk_score = content.get("risk_score") or 0
+    if not user_id:
+        return {"ok": False, "skipped": True, "reason": "缺少账户用户ID(author_json.id)", "platform": platform}
+    payload = {"platform": platform, "id": user_id, "risk_score": round(float(risk_score), 4)}
+    try:
+        result = post_crawler_user_risk(platform, user_id, risk_score)
+        if not result.get("ok"):
+            sys.stderr.write("[crawler-feedback] 反馈失败 %s: %s\n" % (payload, result))
+        return {**payload, **result, "endpoint": CRAWLER_RISK_API_BASE + CRAWLER_RISK_API_PATH}
+    except Exception as exc:
+        sys.stderr.write("[crawler-feedback] 反馈异常 %s: %s\n" % (payload, exc))
+        return {**payload, "ok": False, "error": str(exc), "endpoint": CRAWLER_RISK_API_BASE + CRAWLER_RISK_API_PATH}
+
+
 def api_review(content_id, payload):
     status = payload.get("review_status", "confirmed")
     rid = new_id("REV")
     with db() as conn:
         conn.execute("INSERT INTO review_records VALUES (?,?,?,?,?,?)", (rid, content_id, status, payload.get("review_opinion", ""), payload.get("reviewer", "审核员"), now()))
         conn.execute("UPDATE content_items SET review_status=?, updated_at=? WHERE id=?", (status, now(), content_id))
-        return row_to_dict(conn.execute("SELECT * FROM review_records WHERE id=?", (rid,)).fetchone())
+        record = row_to_dict(conn.execute("SELECT * FROM review_records WHERE id=?", (rid,)).fetchone())
+        content = row_to_dict(conn.execute("SELECT * FROM content_items WHERE id=?", (content_id,)).fetchone())
+    # 确认为违法线索后，向爬虫端反馈该高风险账户
+    if status == "confirmed" and content:
+        record["crawler_feedback"] = feedback_high_risk_account(content)
+    return record
 
 
 def api_push(qs):
