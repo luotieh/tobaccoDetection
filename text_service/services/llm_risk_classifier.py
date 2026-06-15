@@ -53,11 +53,11 @@ class LlmRiskClassifier:
             self.mock = True
             self.fallback = MockSemanticClassifier()
 
-    def classify_text(self, text: str, hits: list[KeywordHit], contacts: list[TextEntity]) -> list[SemanticResult]:
+    def classify_text(self, text: str, hits: list[KeywordHit], contacts: list[TextEntity], context: str = "") -> list[SemanticResult]:
         if self.provider == "local" and (self.fallback is not None or self.model is None or self.tokenizer is None):
             return self.fallback.classify(hits, contacts) if self.fallback else self._normal_result()
         try:
-            prompt = self.build_prompt(text, hits, contacts)
+            prompt = self.build_prompt(text, hits, contacts, context)
             output = self.generate(prompt)
             results = self.parse_output(output)
             return results or self._normal_result()
@@ -66,7 +66,7 @@ class LlmRiskClassifier:
                 return self.fallback.classify(hits, contacts)
             return self._normal_result()
 
-    def build_prompt(self, text: str, hits: list[KeywordHit], contacts: list[TextEntity]) -> str:
+    def build_prompt(self, text: str, hits: list[KeywordHit], contacts: list[TextEntity], context: str = "") -> str:
         hit_items = [
             {
                 "word": hit.normalized_word or hit.word,
@@ -77,6 +77,11 @@ class LlmRiskClassifier:
         ]
         contact_items = [{"type": item.type, "masked": item.masked or item.text} for item in contacts[:20]]
         labels = ", ".join(sorted(ALLOWED_LABELS))
+        context_line = (
+            f"帖子上下文（仅用于理解评论语境，只对下方“文本”判定，不要据上下文本身判风险）：{context[:settings.max_text_length]}\n"
+            if (context or "").strip()
+            else ""
+        )
         return (
             "你是烟草违法交易文本风险语义分类器。只能输出一个 JSON 对象，不要输出解释性前后缀。\n"
             "任务：根据文本、规则命中和联系方式实体判断语义标签。不要直接给最终风险分。\n"
@@ -85,6 +90,7 @@ class LlmRiskClassifier:
             f"允许标签：{labels}\n"
             "输出格式：{\"labels\":[{\"label\":\"sale_intent\",\"score\":0.82}],\"reason\":\"一句话原因\",\"confidence\":0.76}\n"
             f"规则词库摘要：{self.rule_context()}\n"
+            f"{context_line}"
             f"文本：{text[:settings.max_text_length]}\n"
             f"规则命中：{json.dumps(hit_items, ensure_ascii=False)}\n"
             f"联系方式实体：{json.dumps(contact_items, ensure_ascii=False)}\n"

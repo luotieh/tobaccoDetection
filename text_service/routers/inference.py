@@ -8,7 +8,7 @@ router = APIRouter()
 
 @router.post("/infer/text")
 async def infer_text(req: TextInferRequest):
-    return pipeline.infer_text(req.content_id, req.source, req.text)
+    return pipeline.infer_text(req.content_id, req.source, req.text, req.context)
 
 
 @router.post("/infer/content")
@@ -18,4 +18,4 @@ async def infer_content(req: ContentInferRequest):
 
 @router.post("/infer/batch")
 async def infer_batch(req: BatchInferRequest):
-    return BatchInferResult(items=[pipeline.infer_text(item.content_id, item.source, item.text) for item in req.items])
+    return BatchInferResult(items=[pipeline.infer_text(item.content_id, item.source, item.text, item.context) for item in req.items])

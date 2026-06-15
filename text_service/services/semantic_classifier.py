@@ -76,7 +76,7 @@ class TransformersSemanticClassifier:
     def classify(self, hits: list[KeywordHit], contacts: list[TextEntity]) -> list[SemanticResult]:
         return self.classify_text(" ".join(hit.word for hit in hits) or "", hits, contacts)
 
-    def classify_text(self, text: str, hits: list[KeywordHit], contacts: list[TextEntity]) -> list[SemanticResult]:
+    def classify_text(self, text: str, hits: list[KeywordHit], contacts: list[TextEntity], context: str = "") -> list[SemanticResult]:
         if self.mock or self.pipeline is None:
             return self.fallback.classify(hits, contacts)
         raw = self.pipeline(text[: settings.max_text_length] or " ".join(hit.word for hit in hits) or "")
@@ -111,6 +111,7 @@ class SemanticClassifier:
         text_or_hits: str | list[KeywordHit],
         hits: list[KeywordHit] | list[TextEntity] | None = None,
         contacts: list[TextEntity] | None = None,
+        context: str = "",
     ) -> list[SemanticResult]:
         if isinstance(text_or_hits, str):
             text = text_or_hits
@@ -121,5 +122,5 @@ class SemanticClassifier:
             keyword_hits = text_or_hits
             contact_entities = hits if isinstance(hits, list) else []
         if hasattr(self.impl, "classify_text"):
-            return self.impl.classify_text(text, keyword_hits, contact_entities)
+            return self.impl.classify_text(text, keyword_hits, contact_entities, context=context)
         return self.impl.classify(keyword_hits, contact_entities)

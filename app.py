@@ -60,6 +60,8 @@ CRAWLER_RISK_API_BASE = os.environ.get("CRAWLER_RISK_API_BASE", "http://10.20.30
 CRAWLER_RISK_API_PATH = os.environ.get("CRAWLER_RISK_API_PATH", "/api/internal/users/risk-score")
 # 评论区用户判定为高风险的分数阈值（与融合高风险 0.85 一致，可调）
 COMMENT_HIGH_RISK_THRESHOLD = float(os.environ.get("COMMENT_HIGH_RISK_THRESHOLD", "0.85"))
+# 单条内容识别阶段最多给多少条评论打分（防止超大评论区拖垮识别队列）
+COMMENT_SCORE_MAX = int(os.environ.get("COMMENT_SCORE_MAX", "100"))
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "200"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 _YOLO_MODELS = {}
@@ -172,6 +174,13 @@ CONTENT_ITEM_EXTRA_COLUMNS = {
     "author_json": "TEXT DEFAULT ''",
     "media_list": "TEXT DEFAULT ''",
     "raw_payload": "TEXT DEFAULT ''",
+}
+
+# 评论在识别阶段结合帖子上下文打分后落库，审核时直接读取
+CRAWLER_COMMENT_EXTRA_COLUMNS = {
+    "risk_score": "REAL DEFAULT 0",
+    "risk_level": "TEXT DEFAULT ''",
+    "risk_updated_at": "TEXT DEFAULT ''",
 }
 
 LLM_TEXT_CONFIG_EXTRA_COLUMNS = {
@@ -378,6 +387,10 @@ def init_db():
         for column, definition in LLM_TEXT_CONFIG_EXTRA_COLUMNS.items():
             if column not in existing_llm_columns:
                 conn.execute(f"ALTER TABLE llm_text_config ADD COLUMN {column} {definition}")
+        existing_comment_columns = table_columns(conn, "crawler_comments")
+        for column, definition in CRAWLER_COMMENT_EXTRA_COLUMNS.items():
+            if column not in existing_comment_columns:
+                conn.execute(f"ALTER TABLE crawler_comments ADD COLUMN {column} {definition}")
         if conn.execute("SELECT COUNT(*) FROM model_configs").fetchone()[0] == 0:
             conn.executemany("INSERT INTO model_configs VALUES (?,?,?,?,?,?,?,?,?)", MODELS)
         else:
@@ -1450,6 +1463,46 @@ def analyze_fusion(payload):
     }
 
 
+def comment_score_to_level(score):
+    if score >= 0.85:
+        return "high"
+    if score >= 0.65:
+        return "medium"
+    if score >= 0.40:
+        return "low"
+    return "none"
+
+
+def score_content_comments(content):
+    """识别阶段：结合帖子上下文，对评论区(一级 comment + 二级 sub_comment)逐条打分。
+    返回 {comment_db_id: (risk_score, risk_level)}；不占用数据库连接（在识别阶段调用）。"""
+    content_id = content["id"]
+    with db() as conn:
+        rows = rows_to_list(conn.execute(
+            "SELECT id, content FROM crawler_comments WHERE content_id=? AND content<>'' ORDER BY date, id LIMIT ?",
+            (content_id, COMMENT_SCORE_MAX),
+        ).fetchall())
+    if not rows:
+        return {}
+    post_context = " ".join(
+        str(x).strip() for x in [content.get("title"), content.get("raw_text")] if x and str(x).strip()
+    )[:300]
+    scores = {}
+    # 优先走文本服务批量(LLM，带帖子上下文)；失败回退本地规则（仅评论本身）
+    try:
+        items = [{"content_id": r["id"], "source": "comment", "text": r["content"], "context": post_context} for r in rows]
+        resp = service_post_json(TEXT_SERVICE_URL, "/infer/batch", {"items": items}, timeout=max(120, len(items) * 8))
+        for it in resp.get("items", []):
+            s = float(it.get("text_score") or 0)
+            scores[it.get("content_id")] = (round(s, 4), str(it.get("risk_level") or comment_score_to_level(s)))
+    except Exception as exc:
+        sys.stderr.write("[comment-score] 批量评分失败，回退本地规则: %s\n" % exc)
+        for r in rows:
+            s = float(analyze_text({"text": r["content"]}).get("text_risk_score") or 0)
+            scores[r["id"]] = (round(s, 4), comment_score_to_level(s))
+    return scores
+
+
 def recognize_content(content_id):
     # 1) 读取阶段：仅短读，立即释放连接
     with db() as conn:
@@ -1493,10 +1546,17 @@ def recognize_content(content_id):
         "audio_available": audio_result is not None,
         "account_risk_score": account_score,
     })
-    # 3) 写入阶段：仅短写事务（删旧结果+写结果+更新内容），写锁占用极短
+    # 评论区结合帖子上下文逐条打分（仍在识别阶段，不占用数据库连接）
+    comment_scores = score_content_comments(content)
+    # 3) 写入阶段：仅短写事务（删旧结果+写结果+更新内容+落库评论分），写锁占用极短
     review_status = "pending" if fusion["risk_level"] in {"高风险", "中风险"} else "unreviewed"
     with db() as conn:
         conn.execute("DELETE FROM recognition_results WHERE content_id=?", (content_id,))
+        for comment_db_id, (c_score, c_level) in comment_scores.items():
+            conn.execute(
+                "UPDATE crawler_comments SET risk_score=?, risk_level=?, risk_updated_at=? WHERE id=?",
+                (c_score, c_level, now(), comment_db_id),
+            )
         for typ, result, score_key in [
             ("text", text_result, "text_risk_score"),
             ("image", image_result, "image_risk_score"),
@@ -2469,25 +2529,22 @@ def comment_sender_user_id(sender):
 
 
 def feedback_high_risk_comment_users(content):
-    """审核确认后，对评论区(一级 comment + 二级 sub_comment)逐条本地评分，
+    """审核确认后，读取识别阶段已落库的评论风险分(一级 comment + 二级 sub_comment)，
     把高风险评论用户(平台/用户id/风险分)反馈给爬虫端；按用户去重取最高分。"""
     content_id = content["id"]
     platform = content.get("platform") or ""
     author_id = crawler_account_user_id(content)
     with db() as conn:
         rows = rows_to_list(conn.execute(
-            "SELECT comment_type, sender_json, content FROM crawler_comments WHERE content_id=? AND content<>''",
+            "SELECT comment_type, sender_json, risk_score FROM crawler_comments WHERE content_id=? AND content<>''",
             (content_id,),
         ).fetchall())
     best = {}
     for row in rows:
         sender = json_loads(row["sender_json"], {}) or {}
         uid = comment_sender_user_id(sender)
-        text = (row["content"] or "").strip()
-        if not uid or not text or uid == author_id:
-            continue
-        score = float(analyze_text({"text": text}).get("text_risk_score") or 0)
-        if score < COMMENT_HIGH_RISK_THRESHOLD:
+        score = float(row["risk_score"] or 0)
+        if not uid or uid == author_id or score < COMMENT_HIGH_RISK_THRESHOLD:
             continue
         level = "一级" if row["comment_type"] == "comment" else "二级"
         if uid not in best or score > best[uid]["score"]:

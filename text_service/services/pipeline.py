@@ -35,12 +35,13 @@ class TextRiskPipeline:
             "rules": {"enabled": settings.enable_rules, "dictionaries": list(self.matcher.raw().keys())},
         }
 
-    def infer_text(self, content_id: str, source: str, text: str) -> TextInferResult:
+    def infer_text(self, content_id: str, source: str, text: str, context: str = "") -> TextInferResult:
         normalized = self.normalizer.normalize(text)
         hits = self.matcher.match(normalized) if settings.enable_rules else []
         contacts = self.extractor.extract_contacts(normalized)
         brands = self.extractor.extract_brands(hits)
-        semantics = self.classifier.classify(normalized, hits, contacts)
+        # 规则只命中评论本身；context 仅传给语义分类器(LLM)用于理解上下文
+        semantics = self.classifier.classify(normalized, hits, contacts, context=context)
         score, level, risk_types = score_text(hits, semantics, brands, contacts)
         evidence = [EvidenceText(source=source, text=text, start=0, end=len(text))] if hits or contacts else []
         return TextInferResult(

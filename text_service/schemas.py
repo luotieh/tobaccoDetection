@@ -12,6 +12,8 @@ class TextInferRequest(BaseModel):
     content_id: str
     source: str = "text"
     text: str
+    # 可选上下文（如帖子标题/正文）：仅供 LLM 理解语义，不参与规则命中，避免污染评分
+    context: str = ""
 
 
 class ContentInferRequest(BaseModel):
