@@ -42,6 +42,13 @@ MODEL_REGISTRY = {
         "source_url": "https://huggingface.co/Enos-123/smoking-detection/resolve/main/best.pt",
         "description": "YOLOv11-Medium cigarette detector, class: cigarette",
     },
+    "tobacco-yolo11s": {
+        "name": "本地训练 / tobacco-yolo11s",
+        "version": "yolo11s_small_v1-3/best.pt",
+        "path": Path(os.environ.get("TOBACCO_MODEL_PATH", ROOT / "weights" / "best.pt")),
+        "source_url": "",
+        "description": "本地训练 YOLO11s 烟草检测，类别 cig_pack_or_carton（烟盒/条盒），训练 imgsz=1280，推理参数读 weights/args.yaml",
+    },
 }
 DEFAULT_DETECTOR_MODEL_ID = os.environ.get("SMOKING_DETECTOR_MODEL", "basant-yolo26s")
 VISION_SERVICE_URL = os.environ.get("VISION_SERVICE_URL", "http://127.0.0.1:9000")

@@ -55,11 +55,16 @@
 - **后续演进**：生产再升级到「用户表 + 登录 + 角色 + 审计」（方案 c / `NEXT_OPTIMIZATION_PLAN` 任务 4.1）。
 - **验收**：不带凭据访问代理端口返回 401；带正确账号密码可正常使用；8000 端口不直接对外暴露。
 
-### P0-6 关闭 Mock 误判
+### P0-6 关闭 Mock 误判（图像模态已落地真实模型）
 - **问题**：三服务默认开启 Mock fallback（`USE_MOCK_MODEL` / `ASR_ENGINE=mock`），异常时静默回退 mock，演示/试点易把「假命中」当真实结果。
 - **定位**：`.env` `TOBACCO_PROFILE=dev`；fallback 见 `app.py:849-865`（视觉→本地 YOLO→mock）、`1434-1456`（文本/语音→mock）。
-- **实施**：试点以 `real` 或明确标注模式启动；前端各结果页展示已有的 `service_mode` / `asr_engine` / `model_version` / `*_service_error` 字段；缺模型时**报错而非静默 mock**（对接 `NEXT_OPTIMIZATION_PLAN` 任务 1.1 / 2.3）。
-- **验收**：缺模型时 `real` 模式明确报错；前端能区分「真实/演示」结果来源。
+- **已完成（图像）**：接入本地训练模型 `tobacco-yolo11s`（`weights/best.pt`，单类 `cig_pack_or_carton`）。
+  - 推理参数从 `weights/args.yaml` 自动读取（`imgsz=1280`、`iou=0.7`），不再用服务全局默认值 —— 见 `app/services/detector.py:load_train_args`。
+  - 类别经 `normalize_class` 别名映射到 `cigarette_pack`；vision 与管理端两个模型注册表均已登记。
+  - 实测：vision 以 `USE_MOCK_MODEL=false YOLO_MODEL_ID=tobacco-yolo11s` 启动，管理端上传返回 `service_mode=vision-service`、`detected=true`、`confidence≈0.85`，非 mock。
+  - 启动命令（图像真实模式）：`USE_MOCK_MODEL=false YOLO_MODEL_ID=tobacco-yolo11s HOST=127.0.0.1 python3 -m uvicorn app.main:app --port 9000`。
+- **待办（文本/语音）**：如试点需要真实文本语义模型 / Whisper ASR，按同样思路关闭对应 mock 并就位权重；缺模型时**报错而非静默 mock**（对接 `NEXT_OPTIMIZATION_PLAN` 任务 1.1 / 2.3）。
+- **验收**：图像模态已满足（真实命中、非 mock、前端可见 `service_mode`）；文本/语音视试点范围决定是否同步切真实。
 
 ---
 
