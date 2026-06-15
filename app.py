@@ -58,6 +58,8 @@ AUTO_RECOGNIZE = os.environ.get("AUTO_RECOGNIZE", "true").strip().lower() not in
 # 高风险账户反馈爬虫端：IP/端口可配置，默认指向内网爬虫服务
 CRAWLER_RISK_API_BASE = os.environ.get("CRAWLER_RISK_API_BASE", "http://10.20.30.58:5001")
 CRAWLER_RISK_API_PATH = os.environ.get("CRAWLER_RISK_API_PATH", "/api/internal/users/risk-score")
+# 评论区用户判定为高风险的分数阈值（与融合高风险 0.85 一致，可调）
+COMMENT_HIGH_RISK_THRESHOLD = float(os.environ.get("COMMENT_HIGH_RISK_THRESHOLD", "0.85"))
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "200"))
 MAX_UPLOAD_BYTES = MAX_UPLOAD_MB * 1024 * 1024
 _YOLO_MODELS = {}
@@ -2460,6 +2462,49 @@ def feedback_high_risk_account(content):
         return {**payload, "ok": False, "error": str(exc), "endpoint": CRAWLER_RISK_API_BASE + CRAWLER_RISK_API_PATH}
 
 
+def comment_sender_user_id(sender):
+    if isinstance(sender, dict):
+        return first_text(sender.get("id"), sender.get("uid"), sender.get("user_id"))
+    return ""
+
+
+def feedback_high_risk_comment_users(content):
+    """审核确认后，对评论区(一级 comment + 二级 sub_comment)逐条本地评分，
+    把高风险评论用户(平台/用户id/风险分)反馈给爬虫端；按用户去重取最高分。"""
+    content_id = content["id"]
+    platform = content.get("platform") or ""
+    author_id = crawler_account_user_id(content)
+    with db() as conn:
+        rows = rows_to_list(conn.execute(
+            "SELECT comment_type, sender_json, content FROM crawler_comments WHERE content_id=? AND content<>''",
+            (content_id,),
+        ).fetchall())
+    best = {}
+    for row in rows:
+        sender = json_loads(row["sender_json"], {}) or {}
+        uid = comment_sender_user_id(sender)
+        text = (row["content"] or "").strip()
+        if not uid or not text or uid == author_id:
+            continue
+        score = float(analyze_text({"text": text}).get("text_risk_score") or 0)
+        if score < COMMENT_HIGH_RISK_THRESHOLD:
+            continue
+        level = "一级" if row["comment_type"] == "comment" else "二级"
+        if uid not in best or score > best[uid]["score"]:
+            best[uid] = {"score": round(score, 4), "comment_level": level}
+    feedbacks = []
+    for uid, info in best.items():
+        try:
+            result = post_crawler_user_risk(platform, uid, info["score"])
+            if not result.get("ok"):
+                sys.stderr.write("[crawler-feedback] 评论用户反馈失败 %s/%s: %s\n" % (platform, uid, result))
+        except Exception as exc:
+            result = {"ok": False, "error": str(exc)}
+            sys.stderr.write("[crawler-feedback] 评论用户反馈异常 %s/%s: %s\n" % (platform, uid, exc))
+        feedbacks.append({"platform": platform, "id": uid, "risk_score": info["score"], "comment_level": info["comment_level"], **result})
+    return feedbacks
+
+
 def api_review(content_id, payload):
     status = payload.get("review_status", "confirmed")
     rid = new_id("REV")
@@ -2468,9 +2513,12 @@ def api_review(content_id, payload):
         conn.execute("UPDATE content_items SET review_status=?, updated_at=? WHERE id=?", (status, now(), content_id))
         record = row_to_dict(conn.execute("SELECT * FROM review_records WHERE id=?", (rid,)).fetchone())
         content = row_to_dict(conn.execute("SELECT * FROM content_items WHERE id=?", (content_id,)).fetchone())
-    # 确认为违法线索后，向爬虫端反馈该高风险账户
+    # 确认为违法线索后，向爬虫端反馈：发帖人 + 评论区(一级/二级)高风险用户
     if status == "confirmed" and content:
-        record["crawler_feedback"] = feedback_high_risk_account(content)
+        record["crawler_feedback"] = {
+            "author": feedback_high_risk_account(content),
+            "comment_users": feedback_high_risk_comment_users(content),
+        }
     return record
 
 
