@@ -1871,19 +1871,34 @@ def api_dashboard():
 
 
 def api_contents(qs):
-    sql = "SELECT * FROM content_items WHERE 1=1"
+    where = " WHERE 1=1"
     args = []
     for field in ["platform", "content_type", "recognize_status", "risk_level", "review_status"]:
         if qs.get(field):
-            sql += f" AND {field}=?"
+            where += f" AND {field}=?"
             args.append(qs[field])
     if qs.get("keyword"):
-        sql += " AND (title LIKE ? OR raw_text LIKE ? OR account_name LIKE ?)"
+        where += " AND (title LIKE ? OR raw_text LIKE ? OR account_name LIKE ?)"
         kw = f"%{qs['keyword']}%"
         args.extend([kw, kw, kw])
-    sql += " ORDER BY collect_time DESC"
+
+    def parse_int(value, default, lo, hi):
+        try:
+            return max(lo, min(hi, int(value)))
+        except (TypeError, ValueError):
+            return default
+
+    page = parse_int(qs.get("page"), 1, 1, 1_000_000)
+    page_size = parse_int(qs.get("page_size"), 20, 1, 200)
+    offset = (page - 1) * page_size
+
     with db() as conn:
-        return rows_to_list(conn.execute(sql, args).fetchall())
+        total = conn.execute("SELECT COUNT(*) FROM content_items" + where, args).fetchone()[0]
+        rows = rows_to_list(conn.execute(
+            "SELECT * FROM content_items" + where + " ORDER BY collect_time DESC LIMIT ? OFFSET ?",
+            args + [page_size, offset],
+        ).fetchall())
+    return {"items": rows, "total": total, "page": page, "page_size": page_size}
 
 
 def content_comment_texts(content_id):

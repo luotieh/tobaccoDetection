@@ -209,6 +209,11 @@ td { color: #26364d; }
   -webkit-backdrop-filter: blur(18px) saturate(155%);
 }
 .title-cell { max-width: 220px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pager { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 10px; margin-top: 14px; font-size: 13px; color: var(--gray); }
+.pager-ctrl { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.pager-ctrl button:disabled { opacity: .45; cursor: not-allowed; }
+.pager-size { display: inline-flex; align-items: center; gap: 6px; }
+.pager-size select { padding: 4px 6px; }
 .actions-cell { display: flex; gap: 7px; flex-wrap: wrap; min-width: 180px; }
 .tag { display: inline-flex; align-items: center; border-radius: 4px; padding: 3px 8px; font-size: 12px; border: 1px solid transparent; white-space: nowrap; }
 .tag.red { color: var(--red); background: rgba(255,240,240,.76); border-color: rgba(183,45,45,.20); }

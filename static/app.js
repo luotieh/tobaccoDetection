@@ -114,8 +114,31 @@ async function renderDashboard() {
   `;
 }
 
+const contentsState = { page: 1, page_size: 20, total: 0 };
+
+function contentsQuery() {
+  const params = new URLSearchParams();
+  if ($("#kw")?.value) params.set("keyword", $("#kw").value);
+  if ($("#platform")?.value) params.set("platform", $("#platform").value);
+  if ($("#ctype")?.value) params.set("content_type", $("#ctype").value);
+  if ($("#risk")?.value) params.set("risk_level", $("#risk").value);
+  params.set("page", contentsState.page);
+  params.set("page_size", contentsState.page_size);
+  return params;
+}
+
+async function loadContents() {
+  const data = await api(`/api/contents?${contentsQuery().toString()}`);
+  contentsState.total = data.total;
+  contentsState.page = data.page;
+  contentsState.page_size = data.page_size;
+  const wrap = $(".table-wrap");
+  if (wrap) wrap.innerHTML = contentsTable(data.items) + contentsPager();
+  return data;
+}
+
 async function renderContents() {
-  const rows = await api("/api/contents");
+  contentsState.page = 1;
   $("#view").innerHTML = `
     <div class="toolbar">
       <div><label><span>关键词</span><input id="kw" placeholder="标题/账号/正文" /></label></div>
@@ -124,8 +147,9 @@ async function renderContents() {
       <div><label><span>风险等级</span><select id="risk"><option value="">全部</option><option>高风险</option><option>中风险</option><option>低风险</option><option>无风险</option></select></label></div>
       <div class="actions"><button onclick="filterContents()">查询</button><button class="secondary" onclick="openContentForm()">新增内容</button></div>
     </div>
-    <div class="table-wrap">${contentsTable(rows)}</div>
+    <div class="table-wrap"></div>
   `;
+  await loadContents();
 }
 
 async function renderImageTest() {
@@ -386,14 +410,42 @@ function contentsTable(rows) {
   </table>`;
 }
 
+function contentsPager() {
+  const { page, page_size, total } = contentsState;
+  const pages = Math.max(1, Math.ceil(total / page_size));
+  const start = total ? (page - 1) * page_size + 1 : 0;
+  const end = Math.min(total, page * page_size);
+  return `<div class="pager">
+    <span class="pager-info">共 ${total} 条，第 ${start}-${end} 条 / 第 ${page}/${pages} 页</span>
+    <span class="pager-ctrl">
+      <button class="secondary" onclick="gotoContentsPage(1)" ${page <= 1 ? "disabled" : ""}>首页</button>
+      <button class="secondary" onclick="gotoContentsPage(${page - 1})" ${page <= 1 ? "disabled" : ""}>上一页</button>
+      <button class="secondary" onclick="gotoContentsPage(${page + 1})" ${page >= pages ? "disabled" : ""}>下一页</button>
+      <button class="secondary" onclick="gotoContentsPage(${pages})" ${page >= pages ? "disabled" : ""}>末页</button>
+      <label class="pager-size"><span>每页</span>
+        <select onchange="changeContentsPageSize(this.value)">
+          ${[10, 20, 50, 100].map(n => `<option value="${n}" ${n === page_size ? "selected" : ""}>${n}</option>`).join("")}
+        </select>
+      </label>
+    </span>
+  </div>`;
+}
+
+async function gotoContentsPage(page) {
+  const pages = Math.max(1, Math.ceil(contentsState.total / contentsState.page_size));
+  contentsState.page = Math.max(1, Math.min(pages, page));
+  await loadContents();
+}
+
+async function changeContentsPageSize(size) {
+  contentsState.page_size = Number(size) || 20;
+  contentsState.page = 1;
+  await loadContents();
+}
+
 async function filterContents() {
-  const params = new URLSearchParams();
-  if ($("#kw").value) params.set("keyword", $("#kw").value);
-  if ($("#platform").value) params.set("platform", $("#platform").value);
-  if ($("#ctype").value) params.set("content_type", $("#ctype").value);
-  if ($("#risk").value) params.set("risk_level", $("#risk").value);
-  const rows = await api(`/api/contents?${params.toString()}`);
-  $(".table-wrap").innerHTML = contentsTable(rows);
+  contentsState.page = 1;
+  await loadContents();
 }
 
 function openModal(html) {
