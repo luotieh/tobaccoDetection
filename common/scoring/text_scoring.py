@@ -80,7 +80,34 @@ def score_text(
         rule_floor = max(rule_floor, 0.86)
     if has_trade and len(hit_words) >= 2:
         rule_floor = max(rule_floor, 0.72)
-    score = max(score, rule_floor - whitelist_penalty)
+    # 单一信号下限：评论区常见的简短购买/交易/询价/制烟器材，单个命中即应达到上报门槛，
+    # 不依赖 LLM 置信度波动。监管语境下空烟管/纸管等器材提及本身即可疑。
+    if has_trade:
+        rule_floor = max(rule_floor, 0.70)
+    if has_price_or_quantity:
+        rule_floor = max(rule_floor, 0.66)
+    if has_product:
+        rule_floor = max(rule_floor, 0.68)
+    # 语义下限：真实 LLM 能识别短评论(如“怎么下单/多少钱/批发代发/有X吗”)的交易意图，
+    # 即使没有词典命中也应反映出来，避免高意图评论被低估为 normal。
+    sale = semantic_scores.get("sale_intent", 0.0)
+    trade = semantic_scores.get("trade_lead", 0.0)
+    contact_sem = semantic_scores.get("contact_lead", 0.0)
+    price_sem = semantic_scores.get("price_quantity", 0.0)
+    slang_sem = semantic_scores.get("slang_mention", 0.0)
+    intent_count = sum(1 for v in (sale, trade, contact_sem, price_sem, slang_sem) if v >= 0.6)
+    semantic_floor = 0.0
+    if max(sale, trade, contact_sem, slang_sem) >= 0.6:
+        semantic_floor = 0.72
+    elif price_sem >= 0.6:
+        semantic_floor = 0.68
+    if intent_count >= 2:
+        semantic_floor = max(semantic_floor, 0.80)
+    if (sale >= 0.6 or trade >= 0.6) and (contact_sem >= 0.6 or price_sem >= 0.6):
+        semantic_floor = max(semantic_floor, 0.86)
+    if semantic_scores.get("whitelist_context", 0.0) >= 0.8:
+        semantic_floor = 0.0  # 明确白名单语境不抬分
+    score = max(score, rule_floor - whitelist_penalty, semantic_floor - whitelist_penalty)
     score = round(max(0.0, min(score, 1.0)), 4)
     risk_types = sorted({item.label for item in semantics if item.score >= 0.6 and item.label != "normal_discussion"})
     if has_trade:

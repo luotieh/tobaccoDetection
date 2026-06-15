@@ -58,8 +58,9 @@ AUTO_RECOGNIZE = os.environ.get("AUTO_RECOGNIZE", "true").strip().lower() not in
 # 高风险账户反馈爬虫端：IP/端口可配置，默认指向内网爬虫服务
 CRAWLER_RISK_API_BASE = os.environ.get("CRAWLER_RISK_API_BASE", "http://10.20.30.58:5001")
 CRAWLER_RISK_API_PATH = os.environ.get("CRAWLER_RISK_API_PATH", "/api/internal/users/risk-score")
-# 评论区用户判定为高风险的分数阈值（与融合高风险 0.85 一致，可调）
-COMMENT_HIGH_RISK_THRESHOLD = float(os.environ.get("COMMENT_HIGH_RISK_THRESHOLD", "0.85"))
+# 评论区用户判定为高风险的分数阈值。评论是比整帖更低的判定门槛：
+# 售卖帖下的购买/交易/价格询问(怎么下单/多少钱/批发)即应上报，默认 0.65(中风险及以上)
+COMMENT_HIGH_RISK_THRESHOLD = float(os.environ.get("COMMENT_HIGH_RISK_THRESHOLD", "0.65"))
 # 单条内容识别阶段最多给多少条评论打分（防止超大评论区拖垮识别队列）
 COMMENT_SCORE_MAX = int(os.environ.get("COMMENT_SCORE_MAX", "100"))
 MAX_UPLOAD_MB = int(os.environ.get("MAX_UPLOAD_MB", "200"))
