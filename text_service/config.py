@@ -43,6 +43,8 @@ class Settings:
     llm_max_new_tokens = env_int("TEXT_LLM_MAX_NEW_TOKENS", 256)
     llm_temperature = env_float("TEXT_LLM_TEMPERATURE", 0.0)
     llm_timeout_seconds = env_int("TEXT_LLM_TIMEOUT_SECONDS", 10)
+    # 批量推理并发线程数（LLM 调用为 I/O 密集，可并发；过大易触发上游限流）
+    batch_max_workers = env_int("TEXT_BATCH_MAX_WORKERS", 8)
     max_text_length = env_int("TEXT_MAX_TEXT_LENGTH", 512)
     enable_rules = env_bool("TEXT_ENABLE_RULES", True)
     enable_traditional_to_simplified = env_bool("TEXT_ENABLE_TRADITIONAL_TO_SIMPLIFIED", True)
