@@ -137,13 +137,27 @@ async function loadContents() {
   return data;
 }
 
+// 合并默认项与数据库实际取值（去重保序），保证拼音/中文等真实平台值都能被筛选
+function facetOptions(defaults, actual) {
+  const seen = new Set();
+  const out = [];
+  for (const v of [...defaults, ...(actual || [])]) {
+    if (v && !seen.has(v)) { seen.add(v); out.push(v); }
+  }
+  return ['<option value="">全部</option>', ...out.map(v => `<option value="${escapeHtml(v)}">${escapeHtml(v)}</option>`)].join("");
+}
+
 async function renderContents() {
   contentsState.page = 1;
+  let facets = { platforms: [], content_types: [] };
+  try { facets = await api("/api/content-facets"); } catch (e) { /* 退回仅默认项 */ }
+  const platformOpts = facetOptions(["抖音", "快手", "小红书", "微博"], facets.platforms);
+  const ctypeOpts = facetOptions(["视频", "音频", "图片", "文本", "评论", "账号"], facets.content_types);
   $("#view").innerHTML = `
     <div class="toolbar">
       <div><label><span>关键词</span><input id="kw" placeholder="标题/账号/正文" /></label></div>
-      <div><label><span>平台</span><select id="platform"><option value="">全部</option><option>抖音</option><option>快手</option><option>小红书</option><option>微博</option></select></label></div>
-      <div><label><span>内容类型</span><select id="ctype"><option value="">全部</option><option>视频</option><option>音频</option><option>图片</option><option>文本</option><option>评论</option><option>账号</option></select></label></div>
+      <div><label><span>平台</span><select id="platform">${platformOpts}</select></label></div>
+      <div><label><span>内容类型</span><select id="ctype">${ctypeOpts}</select></label></div>
       <div><label><span>风险等级</span><select id="risk"><option value="">全部</option><option>高风险</option><option>中风险</option><option>低风险</option><option>无风险</option></select></label></div>
       <div class="actions"><button onclick="filterContents()">查询</button><button class="secondary" onclick="openContentForm()">新增内容</button></div>
     </div>

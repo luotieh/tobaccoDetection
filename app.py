@@ -1733,6 +1733,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(api_dashboard())
             if path == "/api/contents":
                 return self.send_json(api_contents(qs))
+            if path == "/api/content-facets":
+                return self.send_json(api_content_facets())
             if m := re.match(r"^/api/contents/([^/]+)$", path):
                 detail = get_content_detail(m.group(1))
                 return self.send_json(detail or {"error": "not found"}, 200 if detail else 404)
@@ -1909,6 +1911,18 @@ def api_dashboard():
         "modalities": modality_rows,
         "trend": trend,
     }
+
+
+def api_content_facets():
+    """返回内容列表筛选项的实际取值（去重），让下拉菜单覆盖拼音/中文等真实数据。"""
+    with db() as conn:
+        platforms = [r[0] for r in conn.execute(
+            "SELECT DISTINCT platform FROM content_items WHERE platform IS NOT NULL AND platform<>'' ORDER BY platform"
+        ).fetchall()]
+        content_types = [r[0] for r in conn.execute(
+            "SELECT DISTINCT content_type FROM content_items WHERE content_type IS NOT NULL AND content_type<>'' ORDER BY content_type"
+        ).fetchall()]
+    return {"platforms": platforms, "content_types": content_types}
 
 
 def pagination_params(qs, default_size=20, max_size=200):
