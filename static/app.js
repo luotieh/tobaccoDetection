@@ -159,11 +159,38 @@ async function renderContents() {
       <div><label><span>平台</span><select id="platform">${platformOpts}</select></label></div>
       <div><label><span>内容类型</span><select id="ctype">${ctypeOpts}</select></label></div>
       <div><label><span>风险等级</span><select id="risk"><option value="">全部</option><option>高风险</option><option>中风险</option><option>低风险</option><option>无风险</option></select></label></div>
-      <div class="actions"><button onclick="filterContents()">查询</button><button class="secondary" onclick="openContentForm()">新增内容</button></div>
+      <div class="actions"><button onclick="filterContents()">查询</button><button class="secondary" onclick="openContentForm()">新增内容</button><button class="secondary" id="rerecogBtn" onclick="rerecognizeAll()">重新识别全部</button></div>
     </div>
     <div class="table-wrap"></div>
   `;
   await loadContents();
+  pollRerecognize(false);
+}
+
+async function rerecognizeAll() {
+  if (!confirm("将对全部内容重新识别（刷新帖子风险与评论风险分；已人工审核的状态会保留）。确定？")) return;
+  try {
+    const res = await api("/api/contents/recognize-all", { method: "POST", body: {} });
+    toast(res.message || "已开始重识别");
+    pollRerecognize(true);
+  } catch (e) { toast("启动失败：" + e.message); }
+}
+
+async function pollRerecognize(announceDone) {
+  let data;
+  try { data = await api("/api/contents/recognize-all"); } catch (e) { return; }
+  const s = data.state || {};
+  const btn = $("#rerecogBtn");
+  if (s.running) {
+    if (btn) { btn.disabled = true; btn.textContent = `重识别中 ${s.done}/${s.total}`; }
+    setTimeout(() => pollRerecognize(true), 3000);
+  } else {
+    if (btn) { btn.disabled = false; btn.textContent = "重新识别全部"; }
+    if (announceDone && s.total) {
+      toast(`重识别完成 ${s.done}/${s.total}${s.failed ? `，失败 ${s.failed}` : ""}`);
+      if (currentRoute()[0] === "contents") loadContents();
+    }
+  }
 }
 
 async function renderImageTest() {

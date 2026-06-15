@@ -1633,6 +1633,43 @@ def trigger_auto_recognize():
     _auto_recognize_event.set()
 
 
+# 人工已处置的审核状态，重识别时保留，避免清空人工结论
+REVIEWED_STATUSES = {"confirmed", "false_positive", "observing", "ignored"}
+_rerecognize_lock = threading.Lock()
+_rerecognize_thread = None
+_rerecognize_state = {"running": False, "total": 0, "done": 0, "failed": 0, "started_at": "", "finished_at": ""}
+
+
+def _rerecognize_all_worker():
+    """后台重新识别所有内容：刷新帖子风险与评论风险分；保留已人工审核的状态。"""
+    with db() as conn:
+        rows = rows_to_list(conn.execute("SELECT id, review_status FROM content_items ORDER BY collect_time").fetchall())
+    _rerecognize_state.update({"running": True, "total": len(rows), "done": 0, "failed": 0, "started_at": now(), "finished_at": ""})
+    for row in rows:
+        cid, prev_status = row["id"], row["review_status"]
+        try:
+            recognize_content(cid)
+            if prev_status in REVIEWED_STATUSES:
+                with db() as conn:
+                    conn.execute("UPDATE content_items SET review_status=?, updated_at=? WHERE id=?", (prev_status, now(), cid))
+            _rerecognize_state["done"] += 1
+        except Exception as exc:
+            _rerecognize_state["failed"] += 1
+            sys.stderr.write("[rerecognize-all] %s 重识别失败: %s\n" % (cid, exc))
+    _rerecognize_state.update({"running": False, "finished_at": now()})
+
+
+def trigger_rerecognize_all():
+    """启动后台重识别所有内容；已在跑则返回当前进度。"""
+    global _rerecognize_thread
+    with _rerecognize_lock:
+        if _rerecognize_thread is not None and _rerecognize_thread.is_alive():
+            return {"started": False, "message": "重识别正在进行中", "state": dict(_rerecognize_state)}
+        _rerecognize_thread = threading.Thread(target=_rerecognize_all_worker, name="rerecognize-all", daemon=True)
+        _rerecognize_thread.start()
+    return {"started": True, "message": "已开始后台重识别所有内容", "state": dict(_rerecognize_state)}
+
+
 def get_content_detail(content_id):
     with db() as conn:
         content = row_to_dict(conn.execute("SELECT * FROM content_items WHERE id=?", (content_id,)).fetchone())
@@ -1812,6 +1849,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(api_contents(qs))
             if path == "/api/content-facets":
                 return self.send_json(api_content_facets())
+            if path == "/api/contents/recognize-all":
+                return self.send_json({"state": dict(_rerecognize_state)})
             if m := re.match(r"^/api/contents/([^/]+)$", path):
                 detail = get_content_detail(m.group(1))
                 return self.send_json(detail or {"error": "not found"}, 200 if detail else 404)
@@ -1875,6 +1914,8 @@ class Handler(BaseHTTPRequestHandler):
                 content = api_create_content(payload)
                 trigger_auto_recognize()
                 return self.send_json(content, 201)
+            if path == "/api/contents/recognize-all":
+                return self.send_json(trigger_rerecognize_all())
             if path == "/api/crawler/push":
                 result = api_crawler_push(payload)
                 if result.get("created"):
