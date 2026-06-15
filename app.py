@@ -75,9 +75,17 @@ def new_id(prefix):
     return f"{prefix}{datetime.now().strftime('%Y%m%d%H%M%S')}{random.randint(100, 999)}"
 
 
+DB_BUSY_TIMEOUT_MS = int(os.environ.get("DB_BUSY_TIMEOUT_MS", "15000"))
+
+
 def db():
-    conn = sqlite3.connect(DB_PATH)
+    # timeout + busy_timeout：锁竞争时等待而非立即 "database is locked"
+    conn = sqlite3.connect(DB_PATH, timeout=DB_BUSY_TIMEOUT_MS / 1000)
     conn.row_factory = sqlite3.Row
+    # WAL：读不阻塞写、写不阻塞读，后台自动识别与审核/更新可并发，仅写-写串行
+    conn.execute(f"PRAGMA busy_timeout={DB_BUSY_TIMEOUT_MS}")
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("PRAGMA synchronous=NORMAL")
     return conn
 
 
@@ -1441,47 +1449,52 @@ def analyze_fusion(payload):
 
 
 def recognize_content(content_id):
+    # 1) 读取阶段：仅短读，立即释放连接
     with db() as conn:
         content = row_to_dict(conn.execute("SELECT * FROM content_items WHERE id=?", (content_id,)).fetchone())
-        if not content:
-            return None
-        conn.execute("DELETE FROM recognition_results WHERE content_id=?", (content_id,))
+    if not content:
+        return None
+    # 2) 识别阶段：耗时的文本/图像/语音模型调用，全程不占用数据库连接/写锁
+    try:
+        text_result = text_service_analyze_content(content)
+    except Exception as exc:
+        text_result = analyze_text({"content_id": content_id, "text": text_payload_text(build_content_text_payload(content))})
+        text_result["service_mode"] = "local-text-fallback"
+        text_result["text_service_error"] = str(exc)
+    image_score = 0
+    audio_score = 0
+    image_result = None
+    audio_result = None
+    media_path = resolve_media_path(content["media_url"])
+    media_ext = media_path.suffix.lower() if media_path else ""
+    is_visual_media = content["content_type"] in {"图片", "视频"} or media_ext in {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".mp4", ".mov", ".avi", ".mkv"}
+    is_audio_media = content["content_type"] in {"音频", "视频"} or media_ext in {".wav", ".mp3", ".m4a", ".aac", ".flac", ".mp4", ".mov", ".avi", ".mkv"}
+    if is_visual_media:
+        image_result = analyze_image_with_vision({"content_id": content_id, "image_url": content["media_url"], "media_type": "video" if content["content_type"] == "视频" else "image"})
+        image_score = image_result["image_risk_score"]
+    if is_audio_media and media_path:
         try:
-            text_result = text_service_analyze_content(content)
+            audio_result = audio_service_analyze_media(content, media_path)
         except Exception as exc:
-            text_result = analyze_text({"content_id": content_id, "text": text_payload_text(build_content_text_payload(content))})
-            text_result["service_mode"] = "local-text-fallback"
-            text_result["text_service_error"] = str(exc)
-        image_score = 0
-        audio_score = 0
-        image_result = None
-        audio_result = None
-        media_path = resolve_media_path(content["media_url"])
-        media_ext = media_path.suffix.lower() if media_path else ""
-        is_visual_media = content["content_type"] in {"图片", "视频"} or media_ext in {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".mp4", ".mov", ".avi", ".mkv"}
-        is_audio_media = content["content_type"] in {"音频", "视频"} or media_ext in {".wav", ".mp3", ".m4a", ".aac", ".flac", ".mp4", ".mov", ".avi", ".mkv"}
-        if is_visual_media:
-            image_result = analyze_image_with_vision({"content_id": content_id, "image_url": content["media_url"], "media_type": "video" if content["content_type"] == "视频" else "image"})
-            image_score = image_result["image_risk_score"]
-        if is_audio_media and media_path:
-            try:
-                audio_result = audio_service_analyze_media(content, media_path)
-            except Exception as exc:
-                audio_result = analyze_audio({"content_id": content_id, "audio_url": content["media_url"]})
-                audio_result["service_mode"] = "local-audio-fallback"
-                audio_result["audio_service_error"] = str(exc)
-            audio_score = audio_result["audio_risk_score"]
-        account_score = 0.70 if any(w in content["account_name"] for w in ["同城", "优选", "生活馆"]) else 0.25
-        fusion = analyze_fusion({
-            "content_id": content_id,
-            "text_risk_score": text_result["text_risk_score"],
-            "image_risk_score": image_score,
-            "audio_risk_score": audio_score,
-            "text_available": True,
-            "image_available": image_result is not None,
-            "audio_available": audio_result is not None,
-            "account_risk_score": account_score,
-        })
+            audio_result = analyze_audio({"content_id": content_id, "audio_url": content["media_url"]})
+            audio_result["service_mode"] = "local-audio-fallback"
+            audio_result["audio_service_error"] = str(exc)
+        audio_score = audio_result["audio_risk_score"]
+    account_score = 0.70 if any(w in content["account_name"] for w in ["同城", "优选", "生活馆"]) else 0.25
+    fusion = analyze_fusion({
+        "content_id": content_id,
+        "text_risk_score": text_result["text_risk_score"],
+        "image_risk_score": image_score,
+        "audio_risk_score": audio_score,
+        "text_available": True,
+        "image_available": image_result is not None,
+        "audio_available": audio_result is not None,
+        "account_risk_score": account_score,
+    })
+    # 3) 写入阶段：仅短写事务（删旧结果+写结果+更新内容），写锁占用极短
+    review_status = "pending" if fusion["risk_level"] in {"高风险", "中风险"} else "unreviewed"
+    with db() as conn:
+        conn.execute("DELETE FROM recognition_results WHERE content_id=?", (content_id,))
         for typ, result, score_key in [
             ("text", text_result, "text_risk_score"),
             ("image", image_result, "image_risk_score"),
@@ -1494,7 +1507,6 @@ def recognize_content(content_id):
                 "INSERT INTO recognition_results VALUES (?,?,?,?,?,?,?)",
                 (new_id("RR"), content_id, typ, result["model_version"], float(result[score_key]), json.dumps(result, ensure_ascii=False), now()),
             )
-        review_status = "pending" if fusion["risk_level"] in {"高风险", "中风险"} else "unreviewed"
         conn.execute(
             "UPDATE content_items SET recognize_status='completed', risk_score=?, risk_level=?, review_status=?, updated_at=? WHERE id=?",
             (fusion["risk_score"], fusion["risk_level"], review_status, now(), content_id),

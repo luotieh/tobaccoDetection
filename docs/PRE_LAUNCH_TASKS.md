@@ -75,6 +75,7 @@
 
 ## 2. P1 — 上线后尽快
 
+- **SQLite 并发（已处理）**：`db()` 开启 WAL + `busy_timeout=15s`；`recognize_content` 重构为「短读→模型识别(不占连接)→短写」三段，写锁不再跨耗时模型调用。实测 8/8 并发「推送+立即审核」不再 `database is locked`。
 - **可观测性**：引入结构化日志 + 请求访问日志 + `.runtime/` 日志轮转（当前仅 `print`/`stderr`，无轮转）。
 - **优雅停机**：管理端 `serve_forever` 无 SIGTERM 处理（`app.py:2382`）；`scripts/stop_all.sh` 直接 kill，无 SIGTERM→SIGKILL 过渡。
 - **并发与守护**：微服务 uvicorn 各 Dockerfile 单 worker，按 CPU 加 `--workers`；用 systemd/supervisor 替代 `nohup` 裸进程（无自动重启）。
