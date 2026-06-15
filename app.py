@@ -1413,12 +1413,17 @@ def analyze_fusion(payload):
         ("图像", image_score, bool(payload.get("image_available", image_score > 0)), "图像疑似售烟"),
         ("语音", audio_score, bool(payload.get("audio_available", audio_score > 0)), "语音交易暗示"),
     ]
-    score = (
-        text_score * cfg["text_weight"]
-        + image_score * cfg["image_weight"]
-        + audio_score * cfg["audio_weight"]
-        + float(payload.get("account_risk_score") or 0) * cfg["account_weight"]
-    )
+    available_modalities = [(name, value) for name, value, available, _ in modalities if available]
+    if len(available_modalities) <= 1:
+        # 单模态内容(如评论/纯文本)：直接采用该模态风险分，不做模态加权、不计账号权重
+        score = available_modalities[0][1] if available_modalities else 0.0
+    else:
+        score = (
+            text_score * cfg["text_weight"]
+            + image_score * cfg["image_weight"]
+            + audio_score * cfg["audio_weight"]
+            + float(payload.get("account_risk_score") or 0) * cfg["account_weight"]
+        )
     available_scores = [value for _, value, available, _ in modalities if available]
     strongest_modality = max(available_scores, default=0)
     if strongest_modality >= cfg["high_risk_threshold"]:

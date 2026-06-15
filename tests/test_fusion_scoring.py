@@ -33,7 +33,8 @@ def test_strong_text_signal_is_not_diluted_by_missing_modalities(tmp_path):
 
     assert result["risk_level"] == "高风险"
     assert result["risk_score"] == 0.86
-    assert result["weighted_score"] < 0.4
+    # 单模态(纯文本)内容直接采用文本风险分，不做模态加权、不计账号权重
+    assert result["weighted_score"] == 0.86
     assert result["hit_modalities"] == ["文本"]
     assert result["missing_modalities"] == ["图像", "语音"]
     assert "文本交易引流" in result["violation_type"]
