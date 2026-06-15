@@ -24,3 +24,4 @@ audio_storage/results/*
 .runtime/
 .env
 docs/smoke-scan-main.zip
+deploy/.htpasswd

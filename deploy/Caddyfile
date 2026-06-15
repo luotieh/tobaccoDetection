@@ -1,0 +1,26 @@
+# 烟草违法监测 — 管理端反向代理 + HTTP Basic 鉴权（方案 a，Caddy 版）
+#
+# Caddy 比 nginx 更简单：自带 basicauth，且可自动签发 TLS。
+# 用法：
+#   1. 管理端绑定回环：MANAGEMENT_HOST=127.0.0.1 python3 app.py 8000
+#   2. 生成 bcrypt 口令哈希：caddy hash-password --plaintext '你的密码'
+#      把输出填到下面 basicauth 的哈希处（admin 后面那串）。
+#   3. caddy run --config deploy/Caddyfile
+#
+# 把 :8443 改成你的域名即可让 Caddy 自动配 HTTPS（如 admin.example.com）。
+
+:8443 {
+	# 与应用层 MAX_UPLOAD_MB=200 对齐
+	request_body {
+		max_size 210MB
+	}
+
+	basicauth {
+		# 用户名 admin，值为 `caddy hash-password` 生成的 bcrypt 哈希（示例占位，请替换）
+		admin JDJhJDE0JESAMPLEHASHREPLACEMExxxxxxxxxxxxxxxxxxxxxxxxxxxx
+	}
+
+	reverse_proxy 127.0.0.1:8000 {
+		header_up X-Real-IP {remote_host}
+	}
+}

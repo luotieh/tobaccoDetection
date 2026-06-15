@@ -45,15 +45,15 @@
 - **定位**：管理端多段解析 `app.py:1566-1613` 与图片/文件读取 `1654-1680`；audio `audio_service/routers/inference.py:16`（配置 `MAX_FILE_SIZE_MB=200` 但未生效）；vision `app/routers/inference.py`。
 - **验收**：超限请求返回 413/400 且不读满全文；audio 真正按配置上限拦截。
 
-### P0-5 最小访问控制（鉴权）
+### P0-5 最小访问控制（鉴权）— 已选方案 (a)
 - **问题**：全部 `/api/*` 无任何鉴权，任何能访问到管理端的人都可增删规则、改模型配置、审核、推送。真实用户试点不可接受。
 - **定位**：`do_GET/POST/PUT/DELETE`（`app.py:1706-1842`）无校验。
-- **方案（试点择一）**：
-  - **(a) 反向代理 HTTP Basic**（nginx/caddy 前置）：**零代码、最快**，适合内网试点。
-  - **(b) 管理端单一共享口令 + 会话 Cookie**：少量代码，无需外部组件。
-  - **(c) 用户表 + 登录 + 角色**：工作量最大，对接 `NEXT_OPTIMIZATION_PLAN` 任务 4.1。
-- **推荐**：试点先上 (a) 或 (b)，生产再演进到 (c)。
-- **验收**：未授权访问被拦截；关键操作可归属到访问者。
+- **已选方案 (a) 反向代理 HTTP Basic**（nginx/Caddy 前置）：**应用零改动**，最快可用，适合内网试点。
+  - 落地物：`deploy/nginx.conf`、`deploy/Caddyfile`、`scripts/gen_htpasswd.sh`、`deploy/README.md`。
+  - 配套：`app.py` 新增 `MANAGEMENT_HOST` 支持，管理端与三微服务建议绑定 `127.0.0.1`，仅代理端口对外。
+  - 部署步骤见 `deploy/README.md`。
+- **后续演进**：生产再升级到「用户表 + 登录 + 角色 + 审计」（方案 c / `NEXT_OPTIMIZATION_PLAN` 任务 4.1）。
+- **验收**：不带凭据访问代理端口返回 401；带正确账号密码可正常使用；8000 端口不直接对外暴露。
 
 ### P0-6 关闭 Mock 误判
 - **问题**：三服务默认开启 Mock fallback（`USE_MOCK_MODEL` / `ASR_ENGINE=mock`），异常时静默回退 mock，演示/试点易把「假命中」当真实结果。
@@ -99,6 +99,6 @@
 - [ ] P0-2 审核/推送/规则页分页可用，大数据不卡死。
 - [ ] P0-3 工作台改聚合查询，数值一致且不全表加载。
 - [ ] P0-4 上传超限被拦截，服务不 OOM。
-- [ ] P0-5 访问控制就位（方案 a/b/c 之一），未授权被拦截。
+- [ ] P0-5 访问控制就位（方案 a：反向代理 HTTP Basic，见 `deploy/`），未授权返回 401。
 - [ ] P0-6 试点运行模式明确，Mock 不冒充真实，缺模型报错。
 - [ ] 四服务 `scripts/status_all.sh` 全 healthy；`pytest -q` 全绿。

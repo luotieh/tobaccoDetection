@@ -2432,8 +2432,10 @@ def api_send_push(push_id):
 def main():
     init_db()
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8000
-    server = ThreadingHTTPServer(("0.0.0.0", port), Handler)
-    print(f"Demo server running: http://127.0.0.1:{port}")
+    # 默认监听全网卡保持兼容；置于反向代理(HTTP Basic)之后时建议设为 127.0.0.1，避免 8000 直接暴露
+    host = os.environ.get("MANAGEMENT_HOST", "0.0.0.0")
+    server = ThreadingHTTPServer((host, port), Handler)
+    print(f"Demo server running: http://{host}:{port}")
     # 启动即扫描历史未识别(pending)数据，后台线程依次自动识别
     trigger_auto_recognize()
     server.serve_forever()
