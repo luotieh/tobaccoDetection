@@ -10,7 +10,8 @@ from app.services.detector import TobaccoDetector
 from app.services.evidence import save_evidence_image
 from app.services.ocr import OCRService
 from app.services.scoring import infer_scene_tags, score_visual
-from app.services.video import sample_video
+from app.services.video import FrameSampler
+from app.services.video_analyzer import FrameAnalyzer, VideoAggregator
 
 
 class VisionPipeline:
@@ -19,6 +20,7 @@ class VisionPipeline:
         self.detector = self.get_detector()
         self.ocr = OCRService()
         self.brand_matcher = BrandMatcher()
+        self.sampler = FrameSampler()
 
     def get_detector(self, model_id: str | None = None) -> TobaccoDetector:
         key = model_id or "default"
@@ -65,44 +67,11 @@ class VisionPipeline:
         conf: float | None = None,
         model_id: str | None = None,
     ) -> VideoVisualResult:
-        frames, duration = sample_video(video_path, sample_fps=sample_fps, max_seconds=max_seconds)
-        all_detections = []
-        all_ocr = []
-        evidence_frames = []
-        for index, frame in enumerate(frames):
-            detections = self.get_detector(model_id).predict_image(frame.image, conf=conf, timestamp=frame.timestamp)
-            all_detections.extend(detections)
-            frame_ocr = self.ocr.recognize(frame.image) if detections else []
-            all_ocr.extend(frame_ocr)
-            if detections and len(evidence_frames) < settings.max_evidence_frames:
-                evidence_frames.append(
-                    save_evidence_image(
-                        frame.image,
-                        content_id,
-                        detections,
-                        frame_ocr,
-                        infer_scene_tags(detections, frame_ocr),
-                        filename=f"frame_{frame.frame_no:06d}.jpg",
-                        timestamp=frame.timestamp,
-                    )
-                )
-        brand_results = self.brand_matcher.match(all_ocr)
-        scene_tags = infer_scene_tags(all_detections, all_ocr)
-        frequency = 0.80 if len({d.timestamp for d in all_detections if d.timestamp}) >= 2 else 0.30
-        visual_score, risk_level = score_visual(all_detections, brand_results, all_ocr, scene_tags, frequency_score=frequency)
-        result = VideoVisualResult(
-            content_id=content_id,
-            media_type="video",
-            duration_seconds=duration,
-            sampled_frames=len(frames),
-            visual_score=visual_score,
-            risk_level=risk_level,
-            detected_objects=all_detections,
-            brand_results=brand_results,
-            ocr_text=all_ocr,
-            scene_tags=scene_tags,
-            evidence_frames=evidence_frames,
-        )
+        frames, duration = self.sampler.sample(video_path, sample_fps=sample_fps, max_seconds=max_seconds)
+        analyzer = FrameAnalyzer(self.get_detector(model_id), self.ocr)
+        analyses = analyzer.analyze(frames, conf=conf)
+        aggregator = VideoAggregator(self.brand_matcher)
+        result = aggregator.build(content_id, analyses, duration, len(frames))
         self.save_result(result)
         return result
 
