@@ -47,6 +47,9 @@ class Settings:
     max_video_seconds: int = env_int("MAX_VIDEO_SECONDS", 180)
     max_evidence_frames: int = env_int("MAX_EVIDENCE_FRAMES", 10)
     max_upload_mb: int = env_int("MAX_UPLOAD_MB", 200)
+    video_track_iou: float = env_float("VIDEO_TRACK_IOU", 0.5)
+    video_detect_batch: int = env_int("VIDEO_DETECT_BATCH", 8)
+    video_ocr_every_frame: bool = env_bool("VIDEO_OCR_EVERY_FRAME", True)
 
     upload_dir: Path = Path(os.environ.get("UPLOAD_DIR", "storage/uploads"))
     evidence_dir: Path = Path(os.environ.get("EVIDENCE_DIR", "storage/evidence"))
