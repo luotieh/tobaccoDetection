@@ -84,6 +84,14 @@ def test_aggregator_coverage(monkeypatch):
         def match(self, ocr):
             return []
 
+    # Spy on score_visual to capture frequency_score argument
+    captured = {}
+    def spy_score_visual(detections, brand_results, ocr_texts, scene_tags, frequency_score=0.30):
+        captured['frequency_score'] = frequency_score
+        return (0.0, "none")
+
+    monkeypatch.setattr(va, "score_visual", spy_score_visual)
+
     f0 = FrameAnalysis(frame=VideoFrame(object(), 0, "00:00:00.000"),
                        detections=[_det("cigarette_pack", [0, 0, 10, 10], 0.9)], ocr=[])
     f1 = FrameAnalysis(frame=VideoFrame(object(), 10, "00:00:01.000"), detections=[], ocr=[])
@@ -92,3 +100,4 @@ def test_aggregator_coverage(monkeypatch):
     assert result.duration_seconds == 2.0
     assert result.sampled_frames == 2
     assert len(result.detected_objects) == 1  # 去重后
+    assert captured['frequency_score'] == 0.5  # 1 frame with detection / 2 sampled frames
