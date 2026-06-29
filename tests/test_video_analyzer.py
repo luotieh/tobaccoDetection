@@ -1,6 +1,6 @@
-from app.schemas import Detection, OCRText
+from app.schemas import Detection, OCRText, BrandResult
 from app.services.video import VideoFrame
-from app.services.video_analyzer import FrameAnalyzer
+from app.services.video_analyzer import FrameAnalyzer, iou, dedup_tracks, VideoAggregator, FrameAnalysis
 
 
 class FakeDetector:
@@ -49,3 +49,46 @@ def test_ocr_every_frame_false_only_detected():
     ocr = FakeOCR()
     FrameAnalyzer(NoDetDetector(), ocr, ocr_every_frame=False).analyze(_frames(3))
     assert ocr.calls == 0
+
+
+def _det(name, bbox, conf, ts="00:00:00.000"):
+    return Detection(class_name=name, label_zh=name, bbox=bbox, confidence=conf, timestamp=ts)
+
+
+def test_iou_basic():
+    assert iou([0, 0, 10, 10], [0, 0, 10, 10]) == 1.0
+    assert iou([0, 0, 10, 10], [100, 100, 110, 110]) == 0.0
+
+
+def test_dedup_merges_overlapping_same_class():
+    dets = [
+        _det("cigarette_pack", [0, 0, 10, 10], 0.7, "00:00:00.000"),
+        _det("cigarette_pack", [1, 1, 11, 11], 0.9, "00:00:01.000"),  # 与上重叠 -> 同轨迹
+        _det("cigarette_pack", [500, 500, 510, 510], 0.8, "00:00:02.000"),  # 远处 -> 新轨迹
+    ]
+    reps = dedup_tracks(dets, 0.5)
+    assert len(reps) == 2
+    assert reps[0].confidence == 0.9  # 代表取最高置信度
+
+
+def test_dedup_keeps_different_classes_separate():
+    dets = [_det("cigarette", [0, 0, 10, 10], 0.8), _det("cigarette_pack", [0, 0, 10, 10], 0.8)]
+    assert len(dedup_tracks(dets, 0.5)) == 2
+
+
+def test_aggregator_coverage(monkeypatch):
+    import app.services.video_analyzer as va
+    monkeypatch.setattr(va, "save_evidence_image", lambda *a, **k: None)
+
+    class FakeBrand:
+        def match(self, ocr):
+            return []
+
+    f0 = FrameAnalysis(frame=VideoFrame(object(), 0, "00:00:00.000"),
+                       detections=[_det("cigarette_pack", [0, 0, 10, 10], 0.9)], ocr=[])
+    f1 = FrameAnalysis(frame=VideoFrame(object(), 10, "00:00:01.000"), detections=[], ocr=[])
+    result = VideoAggregator(FakeBrand()).build("vid_test", [f0, f1], duration=2.0, sampled_frames=2)
+    assert result.media_type == "video"
+    assert result.duration_seconds == 2.0
+    assert result.sampled_frames == 2
+    assert len(result.detected_objects) == 1  # 去重后
