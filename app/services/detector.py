@@ -109,30 +109,22 @@ class TobaccoDetector:
         }
         return aliases.get(name, "cigarette" if "cigarette" in name else "unknown")
 
-    def predict_image(self, image: np.ndarray, conf: float | None = None, timestamp: str | None = None) -> list[Detection]:
-        if self.mock or self.model is None:
-            h, w = image.shape[:2]
-            return [
-                Detection(
-                    class_name="cigarette_pack",
-                    label_zh=self.class_mapping["cigarette_pack"],
-                    bbox=[round(w * 0.3, 2), round(h * 0.3, 2), round(w * 0.7, 2), round(h * 0.7, 2)],
-                    confidence=0.76,
-                    timestamp=timestamp,
-                )
-            ]
-        if conf is None:
-            conf = self.infer_params.get("conf") or settings.yolo_conf
-        results = self.model.predict(
-            source=image,
-            conf=conf,
-            iou=self.infer_params.get("iou", settings.yolo_iou),
-            imgsz=self.infer_params.get("imgsz", settings.yolo_img_size),
-            verbose=False,
-        )
-        names = getattr(results[0], "names", {}) or getattr(self.model, "names", {}) or {}
+    def _mock_detections(self, image: np.ndarray, timestamp: str | None) -> list[Detection]:
+        h, w = image.shape[:2]
+        return [
+            Detection(
+                class_name="cigarette_pack",
+                label_zh=self.class_mapping["cigarette_pack"],
+                bbox=[round(w * 0.3, 2), round(h * 0.3, 2), round(w * 0.7, 2), round(h * 0.7, 2)],
+                confidence=0.76,
+                timestamp=timestamp,
+            )
+        ]
+
+    def _result_to_detections(self, result, timestamp: str | None) -> list[Detection]:
+        names = getattr(result, "names", {}) or getattr(self.model, "names", {}) or {}
         detections: list[Detection] = []
-        boxes = getattr(results[0], "boxes", None)
+        boxes = getattr(result, "boxes", None)
         if boxes is None:
             return detections
         for box in boxes:
@@ -150,3 +142,28 @@ class TobaccoDetector:
                 )
             )
         return detections
+
+    def predict_batch(
+        self,
+        images: list[np.ndarray],
+        conf: float | None = None,
+        timestamps: list[str | None] | None = None,
+    ) -> list[list[Detection]]:
+        if not images:
+            return []
+        timestamps = timestamps if timestamps is not None else [None] * len(images)
+        if self.mock or self.model is None:
+            return [self._mock_detections(img, ts) for img, ts in zip(images, timestamps)]
+        if conf is None:
+            conf = self.infer_params.get("conf") or settings.yolo_conf
+        results = self.model.predict(
+            source=list(images),
+            conf=conf,
+            iou=self.infer_params.get("iou", settings.yolo_iou),
+            imgsz=self.infer_params.get("imgsz", settings.yolo_img_size),
+            verbose=False,
+        )
+        return [self._result_to_detections(r, ts) for r, ts in zip(results, timestamps)]
+
+    def predict_image(self, image: np.ndarray, conf: float | None = None, timestamp: str | None = None) -> list[Detection]:
+        return self.predict_batch([image], conf=conf, timestamps=[timestamp])[0]
