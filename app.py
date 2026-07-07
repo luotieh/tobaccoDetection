@@ -19,7 +19,7 @@ from datetime import datetime, timedelta
 from email.message import Message as EmailMessage
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, unquote, urlparse
 
 
 ROOT = Path(__file__).resolve().parent
@@ -2020,6 +2020,9 @@ class Handler(BaseHTTPRequestHandler):
                 if result.get("created"):
                     trigger_auto_recognize()
                 return self.send_json(result, 201 if result.get("success") else 400)
+            if m := re.match(r"^/api/users/([^/]+)/([^/]+)$", path):
+                result = api_receive_user_posts(unquote(m.group(1)), unquote(m.group(2)), payload)
+                return self.send_json(result, 202 if result.get("success") else 400)
             if m := re.match(r"^/api/contents/([^/]+)/recognize$", path):
                 detail = recognize_content(m.group(1))
                 return self.send_json(detail or {"error": "not found"}, 200 if detail else 404)
@@ -2406,6 +2409,35 @@ def api_crawler_push(payload):
     return {"success": True, "accepted": len(accepted), "created": created, "updated": updated, "content_ids": accepted}
 
 
+def api_receive_user_posts(platform, user_id, payload):
+    """阶段③接收：爬虫回推某高危账户近 10 条多模态帖子（ReturnDataUser）。
+    校验 → 建/更新账户(recognizing) → 生成批次 → 复用 crawler_push 入库并打批次标记 → 触发异步识别。"""
+    if not isinstance(payload, dict):
+        return {"error": "payload 必须为对象"}
+    body_user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
+    body_uid = first_text(body_user.get("id"))
+    body_platform = first_text(payload.get("platform"))
+    if body_uid and body_uid != user_id:
+        return {"error": "path user_id 与 body user.id 不一致"}
+    if body_platform and body_platform != platform:
+        return {"error": "path platform 与 body platform 不一致"}
+    items = payload.get("data")
+    if not isinstance(items, list) or not items:
+        return {"error": "data 必须为非空列表"}
+    batch_id = new_id("BATCH")
+    key = account_key_of(platform, user_id)
+    push = api_crawler_push({"platform": platform, "type": first_text(payload.get("type"), "content"), "data": items})
+    content_ids = push.get("content_ids", []) if isinstance(push, dict) else []
+    with db() as conn:
+        for cid in content_ids:
+            conn.execute("UPDATE content_items SET account_key=?, confirm_batch_id=?, updated_at=? WHERE id=?",
+                         (key, batch_id, now(), cid))
+        upsert_account(platform, user_id, user=body_user, status="recognizing", batch_id=batch_id, conn=conn)
+    trigger_auto_recognize()
+    return {"success": True, "account_key": key, "confirm_batch_id": batch_id,
+            "accepted": len(content_ids), "skipped": max(0, len(items) - len(content_ids))}
+
+
 def api_create_content(payload):
     cid = payload.get("id") or new_id("C")
     t = now()
@@ -2602,7 +2634,7 @@ def api_update_rule(rule_id, payload):
 
 def api_reviews(qs):
     status = qs.get("review_status")
-    where = " WHERE c.risk_level IN ('高风险','中风险')"
+    where = " WHERE c.risk_level IN ('高风险','中风险') AND (c.confirm_batch_id IS NULL OR c.confirm_batch_id='')"
     args = []
     if status:
         where += " AND c.review_status=?"
