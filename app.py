@@ -1627,7 +1627,10 @@ def recognize_content(content_id):
             feedback_high_risk_comment_users(content)
         except Exception as exc:
             sys.stderr.write("[auto-feedback] %s 自动反馈失败: %s\n" % (content_id, exc))
-    maybe_finalize_confirm_batch(content)
+    try:
+        maybe_finalize_confirm_batch(content)
+    except Exception as exc:
+        sys.stderr.write("[account-finalize] %s 账户聚合失败: %s\n" % (content_id, exc))
     return get_content_detail(content_id)
 
 

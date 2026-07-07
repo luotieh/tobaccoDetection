@@ -135,6 +135,17 @@ def test_aggregate_hits_on_max_score_even_if_count_low(tmp_path):
     assert m.get_account("小红书:seller")["confirm_status"] == "pending_review"
 
 
+def test_aggregate_hits_on_count_alone_below_max_threshold(tmp_path):
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    # 2 条高风险但单帖分都 < 0.85：仅计数信号命中，最高分信号不命中
+    _seed_batch(m, levels_scores=(("高风险", 0.6), ("高风险", 0.7)))
+    out = m.aggregate_account_confirmation("小红书:seller", "B1")
+    assert out["high_post_count"] == 2
+    assert out["max_post_score"] < m.SECONDARY_MAX_SCORE_THRESHOLD
+    assert m.get_account("小红书:seller")["confirm_status"] == "pending_review"
+
+
 def test_aggregate_dismisses_when_below_all_thresholds(tmp_path):
     m = load_app()
     m.DB_PATH = tmp_path / "demo.db"; m.init_db()
