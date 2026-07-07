@@ -608,6 +608,11 @@ function escapeHtml(value) {
   })[ch]);
 }
 
+// 用于拼进内联事件处理器（如 onclick="fn('...')"）的 URL 分量：encodeURIComponent 已转义 " < > &，
+// 但会保留 ' ( ) * ! ~ . -，因此再把剩余的单引号转成 %27，确保结果不含 ' " < > & 中任意字符，
+// 避免账号等不可信字符串拼接进 JS 字符串字面量时被提前闭合执行任意脚本。decodeURIComponent 可正常还原。
+function routeKey(k) { return encodeURIComponent(k).replace(/'/g, "%27"); }
+
 function phonePostPreview(c, byType, comments = []) {
   const transcript = byType.audio?.transcript || "";
   const ocrText = (byType.image?.ocr_text || []).join(" ");
@@ -1197,7 +1202,7 @@ function accountsTable(rows) {
     <td>${Number(r.max_post_score || 0).toFixed(2)}</td>
     <td>${Number(r.account_risk_score || 0).toFixed(2)}</td>
     <td>${statusTag(r.confirm_status)}</td>
-    <td class="actions-cell"><button class="secondary" onclick="setRoute('account/${encodeURIComponent(r.account_key)}')">查看</button></td>
+    <td class="actions-cell"><button class="secondary" onclick="setRoute('account/${routeKey(r.account_key)}')">查看</button></td>
   </tr>`).join("")}</tbody></table>`;
 }
 
@@ -1223,15 +1228,16 @@ function accountPostsTable(rows) {
 
 async function renderAccountDetail(accountKey) {
   const enc = encodeURIComponent(accountKey);
+  const safeKey = routeKey(accountKey);
   const acc = await api(`/api/accounts/${enc}`);
   const canReport = acc.confirm_status === "confirmed";
   $("#view").innerHTML = `
     <div class="detail-head">
       <button class="secondary" onclick="setRoute('accounts')">返回列表</button>
       <div class="actions-cell">
-        <button onclick="openAccountReview('${enc}','confirmed')">确认违法</button>
-        <button class="secondary" onclick="openAccountReview('${enc}','dismissed')">误报</button>
-        ${canReport ? `<button class="secondary" onclick="window.open('/api/accounts/${enc}/report','_blank')">查看证据报告</button>` : ""}
+        <button onclick="openAccountReview('${safeKey}','confirmed')">确认违法</button>
+        <button class="secondary" onclick="openAccountReview('${safeKey}','dismissed')">误报</button>
+        ${canReport ? `<button class="secondary" onclick="window.open('/api/accounts/${safeKey}/report','_blank')">查看证据报告</button>` : ""}
       </div>
     </div>
     <div class="grid-2">
@@ -1277,7 +1283,11 @@ async function saveAccountReview(enc, status) {
     }});
     if (result.error) throw new Error(result.error);
     closeModal();
-    toast(status === "confirmed" ? "已确认违法，证据报告已生成" : "已标记误报");
+    if (status === "confirmed") {
+      toast(result.report_path ? "已确认违法，证据报告已生成" : "已确认违法（证据报告生成失败，可稍后重试）");
+    } else {
+      toast("已标记误报");
+    }
     renderApp();
   } catch (err) {
     toast("提交失败：" + err.message);
