@@ -166,3 +166,16 @@ def test_finalize_waits_until_all_terminal(tmp_path):
         conn.execute("UPDATE content_items SET recognize_status='failed' WHERE id='B1_1'")
     m.maybe_finalize_confirm_batch({"account_key": "小红书:seller", "confirm_batch_id": "B1"})
     assert m.get_account("小红书:seller")["confirm_status"] == "pending_review"
+
+
+def test_feedback_creates_awaiting_account(tmp_path, monkeypatch):
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    # 避免真实网络：桩掉出站 POST
+    monkeypatch.setattr(m, "post_crawler_user_risk", lambda *a, **k: {"ok": True, "status_code": 200, "response": ""})
+    content = {"platform": "小红书", "risk_score": 0.9,
+               "author_json": '{"id": "seller", "nickname": "城南优选"}'}
+    m.feedback_high_risk_account(content)
+    acc = m.get_account("小红书:seller")
+    assert acc is not None
+    assert acc["confirm_status"] == "awaiting_posts"

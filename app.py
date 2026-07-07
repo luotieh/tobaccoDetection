@@ -2794,6 +2794,10 @@ def feedback_high_risk_account(content):
     risk_score = content.get("risk_score") or 0
     if not user_id:
         return {"ok": False, "skipped": True, "reason": "缺少账户用户ID(author_json.id)", "platform": platform}
+    try:
+        upsert_account(platform, user_id, status="awaiting_posts")
+    except Exception as exc:
+        sys.stderr.write("[account] upsert awaiting 失败 %s/%s: %s\n" % (platform, user_id, exc))
     payload = {"platform": platform, "id": user_id, "risk_score": round(float(risk_score), 4)}
     try:
         result = post_crawler_user_risk(platform, user_id, risk_score)
