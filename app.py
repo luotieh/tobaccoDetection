@@ -21,6 +21,8 @@ from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlparse
 
+import account_report
+
 
 ROOT = Path(__file__).resolve().parent
 STATIC_DIR = ROOT / "static"
@@ -1974,6 +1976,14 @@ class Handler(BaseHTTPRequestHandler):
                 return self.send_json(api_reviews(qs))
             if path == "/api/push":
                 return self.send_json(api_push(qs))
+            if m := re.match(r"^/api/accounts/([^/]+)/report$", path):
+                html_str = api_account_report(unquote(m.group(1)))
+                return self.send_text(html_str, 200, "text/html; charset=utf-8") if html_str else self.send_json({"error": "not found"}, 404)
+            if path == "/api/accounts":
+                return self.send_json(api_accounts(qs))
+            if m := re.match(r"^/api/accounts/([^/]+)$", path):
+                detail = api_account_detail(unquote(m.group(1)))
+                return self.send_json(detail or {"error": "not found"}, 200 if detail else 404)
             return self.send_json({"error": "not found"}, 404)
         except PayloadTooLarge as exc:
             return self.send_json({"error": str(exc)}, 413)
@@ -2027,6 +2037,8 @@ class Handler(BaseHTTPRequestHandler):
             if m := re.match(r"^/api/users/([^/]+)/([^/]+)$", path):
                 result = api_receive_user_posts(unquote(m.group(1)), unquote(m.group(2)), payload)
                 return self.send_json(result, 202 if result.get("success") else 400)
+            if m := re.match(r"^/api/accounts/([^/]+)/review$", path):
+                return self.send_json(api_account_review(unquote(m.group(1)), payload))
             if m := re.match(r"^/api/contents/([^/]+)/recognize$", path):
                 detail = recognize_content(m.group(1))
                 return self.send_json(detail or {"error": "not found"}, 200 if detail else 404)
@@ -2759,6 +2771,101 @@ def maybe_finalize_confirm_batch(content):
     if not rows or any(r["recognize_status"] not in ("completed", "failed") for r in rows):
         return
     aggregate_account_confirmation(account_key, batch_id, rows)
+
+
+def generate_account_report(account_key):
+    """组装账户 + 批次帖子识别结果 + 证据文件，渲染 HTML 落盘，返回相对路径。"""
+    with db() as conn:
+        account = row_to_dict(conn.execute("SELECT * FROM accounts WHERE account_key=?", (account_key,)).fetchone())
+        if not account:
+            return None
+        batch_id = account["confirm_batch_id"]
+        contents = rows_to_list(conn.execute(
+            "SELECT * FROM content_items WHERE confirm_batch_id=? ORDER BY risk_score DESC", (batch_id,)).fetchall())
+        results = {}
+        for c in contents:
+            rrs = rows_to_list(conn.execute(
+                "SELECT model_type, result_json FROM recognition_results WHERE content_id=?", (c["id"],)).fetchall())
+            results[c["id"]] = {r["model_type"]: json_loads(r["result_json"], {}) for r in rrs}
+    posts = []
+    for c in contents:
+        by_type = results.get(c["id"], {})
+        ev_dir = ROOT / "storage" / "evidence" / c["id"]
+        audio_dir = ROOT / "audio_storage" / "evidence" / c["id"]
+        posts.append({
+            "content": c,
+            "text": by_type.get("text"), "image": by_type.get("image"),
+            "audio": by_type.get("audio"), "fusion": by_type.get("fusion"),
+            "evidence_images": [str(p) for p in sorted(ev_dir.glob("*.jpg"))] if ev_dir.exists() else [],
+            "evidence_audio": [str(p) for p in sorted(audio_dir.glob("*.wav"))] if audio_dir.exists() else [],
+        })
+    html_str = account_report.build_account_report_html(account, posts)
+    safe_key = account_key.replace(":", "_").replace("/", "_")
+    report_dir = ROOT / "storage" / "reports" / safe_key
+    report_dir.mkdir(parents=True, exist_ok=True)
+    report_path = report_dir / f"{batch_id or 'latest'}.html"
+    report_path.write_text(html_str, encoding="utf-8")
+    rel = str(report_path.relative_to(ROOT))
+    with db() as conn:
+        conn.execute("UPDATE accounts SET report_path=?, updated_at=? WHERE account_key=?", (rel, now(), account_key))
+    return rel
+
+
+def api_accounts(qs):
+    where, args = [], []
+    if qs.get("confirm_status"):
+        where.append("confirm_status=?"); args.append(qs["confirm_status"])
+    if qs.get("platform"):
+        where.append("platform=?"); args.append(qs["platform"])
+    clause = (" WHERE " + " AND ".join(where)) if where else ""
+    with db() as conn:
+        rows = rows_to_list(conn.execute(
+            "SELECT * FROM accounts" + clause + " ORDER BY account_risk_score DESC, updated_at DESC", args).fetchall())
+    return {"items": rows, "total": len(rows)}
+
+
+def api_account_detail(account_key):
+    with db() as conn:
+        account = row_to_dict(conn.execute("SELECT * FROM accounts WHERE account_key=?", (account_key,)).fetchone())
+        if not account:
+            return None
+        account["posts"] = rows_to_list(conn.execute(
+            "SELECT id, title, content_type, content_url, risk_score, risk_level, recognize_status "
+            "FROM content_items WHERE confirm_batch_id=? ORDER BY risk_score DESC", (account["confirm_batch_id"],)).fetchall())
+    account["violation_type_parsed"] = json_loads(account.get("violation_type"), [])
+    return account
+
+
+def api_account_review(account_key, payload):
+    status = payload.get("review_status", "confirmed")
+    if status not in ("confirmed", "dismissed"):
+        return {"error": "review_status 必须为 confirmed 或 dismissed"}
+    with db() as conn:
+        account = row_to_dict(conn.execute("SELECT account_key FROM accounts WHERE account_key=?", (account_key,)).fetchone())
+        if not account:
+            return {"error": "not found"}
+        conn.execute("UPDATE accounts SET confirm_status=?, reviewer=?, review_opinion=?, review_time=?, updated_at=? "
+                     "WHERE account_key=?",
+                     (status, first_text(payload.get("reviewer"), "审核员"),
+                      first_text(payload.get("review_opinion")), now(), now(), account_key))
+    report_rel = None
+    if status == "confirmed":
+        try:
+            report_rel = generate_account_report(account_key)
+        except Exception as exc:
+            sys.stderr.write("[account-report] %s 生成失败: %s\n" % (account_key, exc))
+    return {"success": True, "account_key": account_key, "confirm_status": status, "report_path": report_rel}
+
+
+def api_account_report(account_key):
+    account = get_account(account_key)
+    if not account:
+        return None
+    rel = account.get("report_path") or generate_account_report(account_key)
+    if not rel:
+        return None
+    path = ROOT / rel
+    return path.read_text(encoding="utf-8") if path.exists() else None
 
 
 def crawler_account_user_id(content):

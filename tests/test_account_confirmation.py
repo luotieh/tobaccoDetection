@@ -179,3 +179,38 @@ def test_feedback_creates_awaiting_account(tmp_path, monkeypatch):
     acc = m.get_account("小红书:seller")
     assert acc is not None
     assert acc["confirm_status"] == "awaiting_posts"
+
+
+def test_account_review_confirm_generates_report(tmp_path):
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    # 造一个 pending_review 账户 + 批次内容
+    m.upsert_account("小红书", "seller",
+                     user={"nickname": "城南优选", "description": "主页有方式", "avatarUrl": ""},
+                     status="recognizing", batch_id="B1")
+    with m.db() as conn:
+        conn.execute("INSERT INTO content_items (id,platform,content_type,title,account_name,recognize_status,"
+                     "risk_score,risk_level,account_key,confirm_batch_id,created_at,updated_at) "
+                     "VALUES ('B1_0','小红书','文本','刚到一批','城南优选','completed',0.9,'高风险','小红书:seller','B1',?,?)",
+                     (m.now(), m.now()))
+    m.aggregate_account_confirmation("小红书:seller", "B1")
+    assert m.get_account("小红书:seller")["confirm_status"] == "pending_review"
+    # 列表按状态过滤
+    listing = m.api_accounts({"confirm_status": "pending_review"})
+    assert any(a["account_key"] == "小红书:seller" for a in listing["items"])
+    # 审核确认 → 生成报告
+    res = m.api_account_review("小红书:seller", {"review_status": "confirmed", "reviewer": "张三"})
+    assert res["success"] and res["report_path"]
+    assert (m.ROOT / res["report_path"]).exists()
+    assert m.get_account("小红书:seller")["confirm_status"] == "confirmed"
+    html_str = m.api_account_report("小红书:seller")
+    assert html_str and "城南优选" in html_str
+
+
+def test_account_review_dismiss_no_report(tmp_path):
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    m.upsert_account("小红书", "seller", status="pending_review", batch_id="B1")
+    res = m.api_account_review("小红书:seller", {"review_status": "dismissed", "reviewer": "李四"})
+    assert res["success"] and not res["report_path"]
+    assert m.get_account("小红书:seller")["confirm_status"] == "dismissed"
