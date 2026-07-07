@@ -61,6 +61,12 @@ CRAWLER_RISK_API_PATH = os.environ.get("CRAWLER_RISK_API_PATH", "/api/internal/u
 # 评论区用户判定为高风险的分数阈值。评论是比整帖更低的判定门槛：
 # 售卖帖下的购买/交易/价格询问(怎么下单/多少钱/批发)即应上报，默认 0.65(中风险及以上)
 COMMENT_HIGH_RISK_THRESHOLD = float(os.environ.get("COMMENT_HIGH_RISK_THRESHOLD", "0.65"))
+# 账户二次确认：批次中高风险帖子数达此值即命中
+SECONDARY_HIGH_POST_COUNT = int(os.environ.get("SECONDARY_HIGH_POST_COUNT", "2"))
+# 账户二次确认：批次最高单帖综合分达此值即命中
+SECONDARY_MAX_SCORE_THRESHOLD = float(os.environ.get("SECONDARY_MAX_SCORE_THRESHOLD", "0.85"))
+# 账户二次确认：期望回推帖子数，仅用于日志/展示，不强校验
+SECONDARY_EXPECTED_POSTS = int(os.environ.get("SECONDARY_EXPECTED_POSTS", "10"))
 # 自动化审核反馈：识别为高风险的内容在识别完成后自动把风险账户反馈爬虫端，无需人工确认
 AUTO_FEEDBACK_ON_RECOGNIZE = os.environ.get("AUTO_FEEDBACK_ON_RECOGNIZE", "true").strip().lower() not in {"0", "false", "no", "off"}
 # 单条内容识别阶段最多给多少条评论打分（防止超大评论区拖垮识别队列）
@@ -177,6 +183,8 @@ CONTENT_ITEM_EXTRA_COLUMNS = {
     "author_json": "TEXT DEFAULT ''",
     "media_list": "TEXT DEFAULT ''",
     "raw_payload": "TEXT DEFAULT ''",
+    "account_key": "TEXT DEFAULT ''",
+    "confirm_batch_id": "TEXT DEFAULT ''",
 }
 
 # 评论在识别阶段结合帖子上下文打分后落库，审核时直接读取
@@ -312,6 +320,29 @@ CREATE TABLE IF NOT EXISTS push_logs (
   push_time TEXT DEFAULT '',
   retry_count INTEGER DEFAULT 0,
   error_message TEXT DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS accounts (
+  account_key TEXT PRIMARY KEY,
+  platform TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  nickname TEXT DEFAULT '',
+  description TEXT DEFAULT '',
+  avatar_url TEXT DEFAULT '',
+  account_risk_score REAL DEFAULT 0,
+  high_post_count INTEGER DEFAULT 0,
+  max_post_score REAL DEFAULT 0,
+  post_count INTEGER DEFAULT 0,
+  confirm_status TEXT DEFAULT 'awaiting_posts',
+  confirm_batch_id TEXT DEFAULT '',
+  last_confirm_at TEXT DEFAULT '',
+  violation_type TEXT DEFAULT '',
+  report_path TEXT DEFAULT '',
+  reviewer TEXT DEFAULT '',
+  review_opinion TEXT DEFAULT '',
+  review_time TEXT DEFAULT '',
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
 );
 """
 
