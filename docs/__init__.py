@@ -93,3 +93,16 @@ class ReturnData(TypedDict):
     # 返回数据
     data: list[VideoData | NoteData]
 
+
+class ReturnDataUser(TypedDict):
+    # 平台
+    platform: str
+    # 用户（被判定为高危、需二次确认的账户）
+    user: UserData
+    # 耗时
+    timeTook: float
+    # 返回数据类型
+    type: str
+    # 该用户近 10 条帖子（多模态）
+    data: list[VideoData | NoteData]
+

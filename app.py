@@ -2618,6 +2618,57 @@ def api_reviews(qs):
     return {"items": rows, "total": total, "page": page, "page_size": page_size}
 
 
+def account_key_of(platform, user_id):
+    return f"{platform}:{user_id}"
+
+
+def get_account(account_key):
+    with db() as conn:
+        return row_to_dict(conn.execute("SELECT * FROM accounts WHERE account_key=?", (account_key,)).fetchone())
+
+
+def _account_status_allows(current, new):
+    # awaiting_posts 不回退已推进的状态；其余状态允许显式设置
+    if new == "awaiting_posts":
+        return current in ("", "awaiting_posts")
+    return True
+
+
+def upsert_account(platform, user_id, user=None, status=None, batch_id=None, conn=None):
+    """建/更新账户实体。user 为 UserData 快照；status 走无回退规则；batch_id 更新当前批次。"""
+    if conn is None:
+        with db() as own:
+            return upsert_account(platform, user_id, user=user, status=status, batch_id=batch_id, conn=own)
+    key = account_key_of(platform, user_id)
+    user = user if isinstance(user, dict) else {}
+    t = now()
+    existing = row_to_dict(conn.execute("SELECT * FROM accounts WHERE account_key=?", (key,)).fetchone())
+    if existing is None:
+        conn.execute(
+            "INSERT INTO accounts (account_key,platform,user_id,nickname,description,avatar_url,"
+            "confirm_status,confirm_batch_id,last_confirm_at,created_at,updated_at) VALUES (?,?,?,?,?,?,?,?,?,?,?)",
+            (key, platform, user_id, first_text(user.get("nickname")), first_text(user.get("description")),
+             first_text(user.get("avatarUrl")), status or "awaiting_posts", batch_id or "", t if batch_id else "", t, t),
+        )
+        return key
+    sets = ["updated_at=?"]
+    args = [t]
+    if user:
+        sets += ["nickname=?", "description=?", "avatar_url=?"]
+        args += [first_text(user.get("nickname"), existing["nickname"]),
+                 first_text(user.get("description"), existing["description"]),
+                 first_text(user.get("avatarUrl"), existing["avatar_url"])]
+    if status and _account_status_allows(existing["confirm_status"], status):
+        sets.append("confirm_status=?")
+        args.append(status)
+    if batch_id:
+        sets += ["confirm_batch_id=?", "last_confirm_at=?"]
+        args += [batch_id, t]
+    args.append(key)
+    conn.execute(f"UPDATE accounts SET {','.join(sets)} WHERE account_key=?", args)
+    return key
+
+
 def crawler_account_user_id(content):
     """从 author_json 提取平台用户ID，用于向爬虫端反馈账户风险。"""
     author = json_loads(content.get("author_json"), {})
