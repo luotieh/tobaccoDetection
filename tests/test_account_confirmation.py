@@ -216,6 +216,66 @@ def test_account_review_dismiss_no_report(tmp_path):
     assert m.get_account("小红书:seller")["confirm_status"] == "dismissed"
 
 
+def _text_content_row(m, cid, batch_id="", account_key=""):
+    with m.db() as conn:
+        conn.execute(
+            "INSERT INTO content_items (id,platform,content_type,title,account_name,recognize_status,"
+            "risk_score,risk_level,media_url,account_key,confirm_batch_id,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (cid, "小红书", "文本", "刚到一批", "城南优选", "pending", 0, "无风险", "",
+             account_key, batch_id, m.now(), m.now()),
+        )
+
+
+def test_recognize_content_skips_auto_feedback_for_batch_post(tmp_path, monkeypatch):
+    """Fix 1 回归：confirm_batch_id 帖子识别为高风险后，不得再次触发爬虫账户反馈(否则造成
+    接收->识别->反馈->接收 自激循环)；非批次帖子的反馈行为不能被这个改动误伤。"""
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    m.AUTO_FEEDBACK_ON_RECOGNIZE = True
+    monkeypatch.setattr(m, "text_service_analyze_content",
+                        lambda content: {"text_risk_score": 0.95, "model_version": "t",
+                                         "hit_keywords": [{"word": "私信"}], "intent_type": "疑似交易引流"})
+    monkeypatch.setattr(m, "score_content_comments", lambda content: {})
+    calls = {"account": 0, "comment_users": 0}
+    monkeypatch.setattr(m, "feedback_high_risk_account", lambda content: calls.__setitem__("account", calls["account"] + 1))
+    monkeypatch.setattr(m, "feedback_high_risk_comment_users", lambda content: calls.__setitem__("comment_users", calls["comment_users"] + 1))
+
+    # 批次帖子：带 confirm_batch_id/account_key，识别为高风险也不应触发反馈
+    _text_content_row(m, "BATCH_0", batch_id="B1", account_key="小红书:seller")
+    m.recognize_content("BATCH_0")
+    assert calls["account"] == 0
+    assert calls["comment_users"] == 0
+
+    # 非批次帖子：无 confirm_batch_id，高风险识别应照常触发反馈(防止改动误伤正常路径)
+    _text_content_row(m, "SOLO_0")
+    m.recognize_content("SOLO_0")
+    assert calls["account"] == 1
+    assert calls["comment_users"] == 1
+
+
+def test_aggregate_does_not_revert_human_reviewed_account(tmp_path):
+    """Fix 2 回归：账户已被人工审核为 confirmed 后，若聚合被重新触发(如“全部重新识别”跑过批次里的
+    最后一条帖子)，不能把人工结论打回 pending_review。"""
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    _seed_batch(m, levels_scores=(("高风险", 0.9), ("高风险", 0.88)))
+    out = m.aggregate_account_confirmation("小红书:seller", "B1")
+    assert out["high_post_count"] == 2
+    assert m.get_account("小红书:seller")["confirm_status"] == "pending_review"
+
+    # 模拟人工审核：确认该账户
+    review = m.api_account_review("小红书:seller", {"review_status": "confirmed", "reviewer": "张三"})
+    assert review["success"]
+    assert m.get_account("小红书:seller")["confirm_status"] == "confirmed"
+
+    # 再次触发聚合(例如批次内容被重新识别，最后一条帖子完成后再次 finalize)
+    m.aggregate_account_confirmation("小红书:seller", "B1")
+    acc = m.get_account("小红书:seller")
+    assert acc["confirm_status"] == "confirmed"  # 未被打回 pending_review
+    assert acc["reviewer"] == "张三"
+
+
 def test_end_to_end_receive_recognize_confirm_report(tmp_path, monkeypatch):
     m = load_app()
     m.DB_PATH = tmp_path / "demo.db"; m.init_db()

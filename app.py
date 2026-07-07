@@ -1621,7 +1621,9 @@ def recognize_content(content_id):
             (fusion["risk_score"], fusion["risk_level"], review_status, now(), content_id),
         )
     # 自动化审核反馈：高风险内容识别完成后自动反馈风险账户(发帖人+评论区高风险用户)到爬虫端
-    if AUTO_FEEDBACK_ON_RECOGNIZE and fusion["risk_level"] == "高风险":
+    # 注意：二次确认批次(confirm_batch_id)的帖子本就是爬虫推送来复核的高风险内容，
+    # 若在此再次反馈账户会触发 接收→识别→反馈→接收 的自激振荡，故排除批次帖子。
+    if AUTO_FEEDBACK_ON_RECOGNIZE and fusion["risk_level"] == "高风险" and not content.get("confirm_batch_id"):
         content["risk_score"] = fusion["risk_score"]
         content["risk_level"] = fusion["risk_level"]
         try:
@@ -2726,6 +2728,8 @@ def collect_violation_types(conn, batch_id):
     types = []
     for r in rows:
         data = json_loads(r["result_json"], {})
+        if not isinstance(data, dict):
+            continue
         for key in ("violation_type", "risk_types"):
             val = data.get(key)
             if isinstance(val, list):
@@ -2749,9 +2753,13 @@ def aggregate_account_confirmation(account_key, batch_id, rows=None):
         hit = high_post_count >= SECONDARY_HIGH_POST_COUNT or max_post_score >= SECONDARY_MAX_SCORE_THRESHOLD
         status = "pending_review" if hit else "dismissed"
         violation = collect_violation_types(conn, batch_id)
+        # 聚合只允许 recognizing -> pending_review/dismissed 这一次转换；
+        # 一旦账户已被人工审核(confirmed/dismissed)或处于其它后续状态，绝不能被重识别(如“全部重新识别”)
+        # 再次触发的聚合覆盖回去，否则会丢失人工决策(reviewer/review_time/report_path 与状态不一致)。
         conn.execute(
             "UPDATE accounts SET account_risk_score=?, high_post_count=?, max_post_score=?, post_count=?, "
-            "confirm_status=?, violation_type=?, updated_at=? WHERE account_key=? AND confirm_batch_id=?",
+            "confirm_status=?, violation_type=?, updated_at=? WHERE account_key=? AND confirm_batch_id=? "
+            "AND confirm_status='recognizing'",
             (max_post_score, high_post_count, max_post_score, post_count, status,
              json.dumps(violation, ensure_ascii=False), now(), account_key, batch_id),
         )
