@@ -10,9 +10,11 @@ weights/*.pt
 storage/uploads/*
 storage/evidence/*
 storage/results/*
+storage/reports/*
 !storage/uploads/.gitkeep
 !storage/evidence/.gitkeep
 !storage/results/.gitkeep
+!storage/reports/.gitkeep
 audio_storage/uploads/*
 audio_storage/audio/*
 audio_storage/evidence/*

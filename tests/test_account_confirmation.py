@@ -214,3 +214,29 @@ def test_account_review_dismiss_no_report(tmp_path):
     res = m.api_account_review("小红书:seller", {"review_status": "dismissed", "reviewer": "李四"})
     assert res["success"] and not res["report_path"]
     assert m.get_account("小红书:seller")["confirm_status"] == "dismissed"
+
+
+def test_end_to_end_receive_recognize_confirm_report(tmp_path, monkeypatch):
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    m.AUTO_RECOGNIZE = False  # 手动 drain，确定性
+    # 无外部服务：文本高分、评论空、无图无音（纯文本帖）
+    monkeypatch.setattr(m, "text_service_analyze_content",
+                        lambda content: {"text_risk_score": 0.95, "model_version": "t",
+                                         "hit_keywords": [{"word": "私信"}], "intent_type": "疑似交易引流"})
+    monkeypatch.setattr(m, "score_content_comments", lambda content: {})
+    payload = {"platform": "小红书", "type": "note", "timeTook": 1.0,
+               "user": {"id": "seller", "nickname": "城南优选", "description": "主页有方式", "avatarUrl": ""},
+               "data": [{"date": "2026-06-04", "url": f"https://x/p{i}", "title": "刚到一批", "id": f"p{i}",
+                         "videoUrl": None, "imageList": [],
+                         "author": {"id": "seller", "nickname": "城南优选", "description": "主页有方式", "avatarUrl": ""},
+                         "content": "刚到一批，老客户私信", "comments": []} for i in range(3)]}
+    res = m.api_receive_user_posts("小红书", "seller", payload)
+    assert res["success"] and res["accepted"] == 3
+    m.drain_pending_recognition()                       # 同步处理识别队列 → 触发聚合
+    acc = m.get_account("小红书:seller")
+    assert acc["confirm_status"] == "pending_review"
+    assert acc["high_post_count"] == 3
+    review = m.api_account_review("小红书:seller", {"review_status": "confirmed", "reviewer": "张三"})
+    assert review["report_path"]
+    assert (m.ROOT / review["report_path"]).exists()
