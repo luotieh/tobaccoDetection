@@ -3,7 +3,7 @@ const state = { route: "dashboard", data: null };
 const menus = [
   ["核心功能", [["dashboard", "工作台"], ["contents", "识别内容列表"], ["image-test", "图像识别测试"], ["text-test", "文本识别测试"], ["audio-test", "语音识别测试"]]],
   ["配置管理", [["models", "模型配置"], ["text-llm", "LLM 文本配置"], ["fusion", "多模态融合配置"], ["rules", "规则词库"]]],
-  ["业务闭环", [["reviews", "审核管理"], ["push", "推送管理"], ["users", "用户角色"]]],
+  ["业务闭环", [["reviews", "审核管理"], ["accounts", "账户二次确认"], ["push", "推送管理"], ["users", "用户角色"]]],
 ];
 
 const titles = {
@@ -18,6 +18,8 @@ const titles = {
   fusion: ["多模态融合配置", "调整权重和风险等级阈值"],
   rules: ["规则词库", "维护关键词、黑话、品牌词、白名单和地域词"],
   reviews: ["审核管理", "处理中高风险待审核线索"],
+  accounts: ["账户二次确认", "处理命中双信号的高风险账户，确认违法或标记误报"],
+  account: ["账户详情", "查看批次帖子识别结果，确认违法或标记误报"],
   push: ["推送管理", "生成线索并模拟推送监管平台"],
   users: ["用户角色", "演示系统角色"],
 };
@@ -57,12 +59,13 @@ function statusText(status) {
   return ({
     pending: "待审核", confirmed: "已确认", false_positive: "误报", ignored: "忽略",
     observing: "暂存观察", unreviewed: "未审核", completed: "已识别", waiting: "待推送",
-    success: "推送成功", failed: "推送失败", retrying: "重试中"
+    success: "推送成功", failed: "推送失败", retrying: "重试中",
+    awaiting_posts: "待采集", recognizing: "识别中", pending_review: "待二次确认", dismissed: "误报"
   })[status] || status || "-";
 }
 
 function statusTag(status) {
-  const color = { confirmed: "green", pending: "orange", success: "green", failed: "red", completed: "green" }[status] || "gray";
+  const color = { confirmed: "green", pending: "orange", success: "green", failed: "red", completed: "green", pending_review: "orange", recognizing: "blue" }[status] || "gray";
   return `<span class="tag ${color}">${statusText(status)}</span>`;
 }
 
@@ -73,6 +76,7 @@ function setRoute(route) {
 function currentRoute() {
   const raw = location.hash.replace(/^#/, "") || "dashboard";
   if (raw.startsWith("detail/")) return ["detail", raw.split("/")[1]];
+  if (raw.startsWith("account/")) return ["account", decodeURIComponent(raw.split("/")[1])];
   return [raw, null];
 }
 
@@ -1185,6 +1189,101 @@ async function renderReviews() {
   await loadReviews();
 }
 
+function accountsTable(rows) {
+  return `<table><thead><tr><th>账户</th><th>平台</th><th>命中/总帖数</th><th>单帖最高分</th><th>账户风险分</th><th>状态</th><th>操作</th></tr></thead><tbody>${rows.map(r => `<tr>
+    <td>${escapeHtml(r.nickname || r.user_id)}</td>
+    <td>${escapeHtml(r.platform)}</td>
+    <td>${r.high_post_count || 0} / ${r.post_count || 0}</td>
+    <td>${Number(r.max_post_score || 0).toFixed(2)}</td>
+    <td>${Number(r.account_risk_score || 0).toFixed(2)}</td>
+    <td>${statusTag(r.confirm_status)}</td>
+    <td class="actions-cell"><button class="secondary" onclick="setRoute('account/${encodeURIComponent(r.account_key)}')">查看</button></td>
+  </tr>`).join("")}</tbody></table>`;
+}
+
+async function renderAccounts() {
+  const data = await api("/api/accounts?confirm_status=pending_review");
+  $("#view").innerHTML = `
+    <div class="panel"><h3 class="section-title">待二次确认账户</h3><p class="pre">账户命中「高风险帖数量」或「单帖最高风险分」双信号之一后进入本队列，需人工复核确认违法或标记误报。</p></div>
+    <div class="table-wrap">${accountsTable(data.items)}</div>
+  `;
+}
+
+function accountPostsTable(rows) {
+  return `<table><thead><tr><th>内容编号</th><th>类型</th><th>标题</th><th>风险分</th><th>风险等级</th><th>识别状态</th><th>操作</th></tr></thead><tbody>${rows.map(r => `<tr>
+    <td>${r.id}</td>
+    <td>${escapeHtml(r.content_type)}</td>
+    <td class="title-cell" title="${escapeHtml(r.title || "")}">${escapeHtml(r.title || "")}</td>
+    <td>${Number(r.risk_score || 0).toFixed(2)}</td>
+    <td>${riskTag(r.risk_level)}</td>
+    <td>${statusTag(r.recognize_status)}</td>
+    <td class="actions-cell"><button class="secondary" onclick="setRoute('detail/${r.id}')">查看</button></td>
+  </tr>`).join("")}</tbody></table>`;
+}
+
+async function renderAccountDetail(accountKey) {
+  const enc = encodeURIComponent(accountKey);
+  const acc = await api(`/api/accounts/${enc}`);
+  const canReport = acc.confirm_status === "confirmed";
+  $("#view").innerHTML = `
+    <div class="detail-head">
+      <button class="secondary" onclick="setRoute('accounts')">返回列表</button>
+      <div class="actions-cell">
+        <button onclick="openAccountReview('${enc}','confirmed')">确认违法</button>
+        <button class="secondary" onclick="openAccountReview('${enc}','dismissed')">误报</button>
+        ${canReport ? `<button class="secondary" onclick="window.open('/api/accounts/${enc}/report','_blank')">查看证据报告</button>` : ""}
+      </div>
+    </div>
+    <div class="grid-2">
+      <div class="panel"><h3 class="section-title">账户信息</h3><div class="kv">
+        <b>昵称</b><span>${escapeHtml(acc.nickname || "-")}</span>
+        <b>平台</b><span>${escapeHtml(acc.platform)}</span>
+        <b>用户ID</b><span>${escapeHtml(acc.user_id)}</span>
+        <b>简介</b><span>${escapeHtml(acc.description || "-")}</span>
+        <b>状态</b><span>${statusTag(acc.confirm_status)}</span>
+        <b>审核人</b><span>${escapeHtml(acc.reviewer || "-")}</span>
+        <b>审核意见</b><span>${escapeHtml(acc.review_opinion || "-")}</span>
+      </div></div>
+      <div class="panel"><h3 class="section-title">聚合评定</h3><div class="kv">
+        <b>命中高风险帖数</b><span>${acc.high_post_count || 0}</span>
+        <b>批次帖子总数</b><span>${acc.post_count || 0}</span>
+        <b>单帖最高分</b><span>${Number(acc.max_post_score || 0).toFixed(2)}</span>
+        <b>账户风险分</b><span>${Number(acc.account_risk_score || 0).toFixed(2)}</span>
+        <b>违规类型</b><span>${(acc.violation_type_parsed || []).map(escapeHtml).join("、") || "-"}</span>
+      </div></div>
+    </div>
+    <div class="panel"><h3 class="section-title">批次帖子（${(acc.posts || []).length}）</h3><div class="table-wrap">${accountPostsTable(acc.posts || [])}</div></div>
+  `;
+}
+
+function openAccountReview(enc, status) {
+  const label = status === "confirmed" ? "确认违法" : "标记误报";
+  openModal(`
+    <h3>账户二次确认 - ${label}</h3>
+    <div class="form-grid">
+      <label><span>审核人</span><input id="acc_reviewer" value="监管审核员" /></label>
+      <label class="full"><span>审核意见</span><textarea id="acc_review_opinion">${status === "confirmed" ? "账户命中多条高风险内容，确认为违法销售线索。" : "人工复核后判定为误报，予以排除。"}</textarea></label>
+    </div>
+    <div class="dialog-actions"><button class="secondary" onclick="closeModal()">取消</button><button onclick="saveAccountReview('${enc}','${status}')">提交</button></div>
+  `);
+}
+
+async function saveAccountReview(enc, status) {
+  try {
+    const result = await api(`/api/accounts/${enc}/review`, { method: "POST", body: {
+      review_status: status,
+      reviewer: $("#acc_reviewer").value || "监管审核员",
+      review_opinion: $("#acc_review_opinion").value,
+    }});
+    if (result.error) throw new Error(result.error);
+    closeModal();
+    toast(status === "confirmed" ? "已确认违法，证据报告已生成" : "已标记误报");
+    await renderAccountDetail(decodeURIComponent(enc));
+  } catch (err) {
+    toast("提交失败：" + err.message);
+  }
+}
+
 const pushState = { page: 1, page_size: 20, total: 0 };
 
 function pushTable(rows) {
@@ -1249,6 +1348,8 @@ async function renderApp() {
     else if (route === "fusion") await renderFusion();
     else if (route === "rules") await renderRules();
     else if (route === "reviews") await renderReviews();
+    else if (route === "accounts") await renderAccounts();
+    else if (route === "account") await renderAccountDetail(id);
     else if (route === "push") await renderPush();
     else if (route === "users") renderUsers();
     else setRoute("dashboard");
