@@ -1278,7 +1278,7 @@ async function saveAccountReview(enc, status) {
     if (result.error) throw new Error(result.error);
     closeModal();
     toast(status === "confirmed" ? "已确认违法，证据报告已生成" : "已标记误报");
-    await renderAccountDetail(decodeURIComponent(enc));
+    renderApp();
   } catch (err) {
     toast("提交失败：" + err.message);
   }
