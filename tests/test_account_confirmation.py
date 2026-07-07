@@ -103,3 +103,55 @@ def test_batch_content_excluded_from_content_review_queue(tmp_path):
     with m.db() as conn:
         batch_ids = {r["id"] for r in conn.execute("SELECT id FROM content_items WHERE confirm_batch_id=?", (batch,)).fetchall()}
     assert ids_in_queue.isdisjoint(batch_ids)
+
+
+def _seed_batch(m, batch="B1", key="小红书:seller", levels_scores=((("高风险", 0.9),) * 2)):
+    m.upsert_account("小红书", "seller", status="recognizing", batch_id=batch)
+    with m.db() as conn:
+        for i, (level, score) in enumerate(levels_scores):
+            conn.execute(
+                "INSERT INTO content_items (id,platform,content_type,title,account_name,recognize_status,"
+                "risk_score,risk_level,account_key,confirm_batch_id,created_at,updated_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                (f"{batch}_{i}", "小红书", "文本", "t", "城南优选", "completed", score, level, key, batch, m.now(), m.now()),
+            )
+
+
+def test_aggregate_hits_on_count(tmp_path):
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    _seed_batch(m, levels_scores=(("高风险", 0.9), ("高风险", 0.88)))
+    out = m.aggregate_account_confirmation("小红书:seller", "B1")
+    assert out["high_post_count"] == 2
+    assert m.get_account("小红书:seller")["confirm_status"] == "pending_review"
+
+
+def test_aggregate_hits_on_max_score_even_if_count_low(tmp_path):
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    _seed_batch(m, levels_scores=(("高风险", 0.9), ("中风险", 0.5)))  # 计数 1 < 2，但最高分 0.9 >= 0.85
+    out = m.aggregate_account_confirmation("小红书:seller", "B1")
+    assert out["high_post_count"] == 1
+    assert m.get_account("小红书:seller")["confirm_status"] == "pending_review"
+
+
+def test_aggregate_dismisses_when_below_all_thresholds(tmp_path):
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    _seed_batch(m, levels_scores=(("中风险", 0.5), ("低风险", 0.3)))
+    m.aggregate_account_confirmation("小红书:seller", "B1")
+    assert m.get_account("小红书:seller")["confirm_status"] == "dismissed"
+
+
+def test_finalize_waits_until_all_terminal(tmp_path):
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    _seed_batch(m, levels_scores=(("高风险", 0.9), ("高风险", 0.9)))
+    with m.db() as conn:  # 其中一条仍在 pending
+        conn.execute("UPDATE content_items SET recognize_status='pending' WHERE id='B1_1'")
+    m.maybe_finalize_confirm_batch({"account_key": "小红书:seller", "confirm_batch_id": "B1"})
+    assert m.get_account("小红书:seller")["confirm_status"] == "recognizing"  # 未聚合
+    with m.db() as conn:  # 补齐终态（failed 也算终态）
+        conn.execute("UPDATE content_items SET recognize_status='failed' WHERE id='B1_1'")
+    m.maybe_finalize_confirm_batch({"account_key": "小红书:seller", "confirm_batch_id": "B1"})
+    assert m.get_account("小红书:seller")["confirm_status"] == "pending_review"

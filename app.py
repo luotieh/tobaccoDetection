@@ -1627,6 +1627,7 @@ def recognize_content(content_id):
             feedback_high_risk_comment_users(content)
         except Exception as exc:
             sys.stderr.write("[auto-feedback] %s 自动反馈失败: %s\n" % (content_id, exc))
+    maybe_finalize_confirm_batch(content)
     return get_content_detail(content_id)
 
 
@@ -2699,6 +2700,62 @@ def upsert_account(platform, user_id, user=None, status=None, batch_id=None, con
     args.append(key)
     conn.execute(f"UPDATE accounts SET {','.join(sets)} WHERE account_key=?", args)
     return key
+
+
+def collect_violation_types(conn, batch_id):
+    """从批次内容的 fusion 识别结果里并集违规类型，best-effort。"""
+    rows = rows_to_list(conn.execute(
+        "SELECT rr.result_json FROM recognition_results rr "
+        "JOIN content_items c ON c.id=rr.content_id "
+        "WHERE c.confirm_batch_id=? AND rr.model_type='fusion'", (batch_id,)).fetchall())
+    types = []
+    for r in rows:
+        data = json_loads(r["result_json"], {})
+        for key in ("violation_type", "risk_types"):
+            val = data.get(key)
+            if isinstance(val, list):
+                for v in val:
+                    if v and v not in types:
+                        types.append(v)
+    return types
+
+
+def aggregate_account_confirmation(account_key, batch_id, rows=None):
+    """双信号聚合：count(高风险) 或 max(综合分) 达阈 → pending_review，否则 dismissed。"""
+    with db() as conn:
+        if rows is None:
+            rows = rows_to_list(conn.execute(
+                "SELECT recognize_status, risk_level, risk_score FROM content_items WHERE confirm_batch_id=?", (batch_id,)).fetchall())
+        # 只按识别成功(completed)的帖子聚合；failed 帖子不计入高危信号
+        completed = [r for r in rows if r["recognize_status"] == "completed"]
+        high_post_count = sum(1 for r in completed if r["risk_level"] == "高风险")
+        max_post_score = max([float(r["risk_score"] or 0) for r in completed], default=0.0)
+        post_count = len(rows)
+        hit = high_post_count >= SECONDARY_HIGH_POST_COUNT or max_post_score >= SECONDARY_MAX_SCORE_THRESHOLD
+        status = "pending_review" if hit else "dismissed"
+        violation = collect_violation_types(conn, batch_id)
+        conn.execute(
+            "UPDATE accounts SET account_risk_score=?, high_post_count=?, max_post_score=?, post_count=?, "
+            "confirm_status=?, violation_type=?, updated_at=? WHERE account_key=? AND confirm_batch_id=?",
+            (max_post_score, high_post_count, max_post_score, post_count, status,
+             json.dumps(violation, ensure_ascii=False), now(), account_key, batch_id),
+        )
+    return {"confirm_status": status, "high_post_count": high_post_count, "max_post_score": max_post_score}
+
+
+def maybe_finalize_confirm_batch(content):
+    """某条帖子识别完成后：若属于二次确认批次且批次全部到终态(completed/failed)，触发账户聚合。"""
+    batch_id = (content or {}).get("confirm_batch_id")
+    account_key = (content or {}).get("account_key")
+    if not batch_id or not account_key:
+        return
+    with db() as conn:
+        rows = rows_to_list(conn.execute(
+            "SELECT recognize_status, risk_level, risk_score FROM content_items WHERE confirm_batch_id=?",
+            (batch_id,)).fetchall())
+    if not rows or any(r["recognize_status"] not in ("completed", "failed") for r in rows):
+        return
+    aggregate_account_confirmation(account_key, batch_id, rows)
 
 
 def crawler_account_user_id(content):
