@@ -336,3 +336,54 @@ def test_failed_post_still_finalizes_batch(tmp_path, monkeypatch):
     m.drain_pending_recognition()
     # 2 条 completed 高风险 → 双信号命中 → pending_review，而非卡在 recognizing
     assert m.get_account("小红书:seller")["confirm_status"] == "pending_review"
+
+
+def test_recognition_splits_by_pass(tmp_path, monkeypatch):
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    m.AUTO_RECOGNIZE = False
+    m.AUTO_FEEDBACK_ON_RECOGNIZE = False
+    calls = {"image": 0, "audio": 0}
+    monkeypatch.setattr(m, "analyze_image_with_vision",
+                        lambda payload: (calls.__setitem__("image", calls["image"] + 1) or
+                                         {"image_risk_score": 0.9, "model_version": "i", "detected_objects": [], "ocr_text": []}))
+    monkeypatch.setattr(m, "audio_service_analyze_media",
+                        lambda content, media_path: (calls.__setitem__("audio", calls["audio"] + 1) or
+                                                     {"audio_risk_score": 0.8, "model_version": "a", "transcript": ""}))
+    monkeypatch.setattr(m, "text_service_analyze_content",
+                        lambda content: {"text_risk_score": 0.9, "model_version": "t", "hit_keywords": [], "intent_type": "疑似交易引流"})
+    monkeypatch.setattr(m, "score_content_comments", lambda content: {})
+    with m.db() as conn:
+        conn.execute("INSERT INTO content_items (id,platform,content_type,title,account_name,media_url,recognize_status,created_at,updated_at) "
+                     "VALUES ('FP1','小红书','图片','t','城南优选','/tmp/x.jpg','pending',?,?)", (m.now(), m.now()))
+    m.recognize_content("FP1")  # 首次(无 batch) → 不跑图像/语音
+    assert calls == {"image": 0, "audio": 0}
+    with m.db() as conn:
+        types = {r["model_type"] for r in conn.execute("SELECT model_type FROM recognition_results WHERE content_id='FP1'").fetchall()}
+    assert types == {"text", "fusion"}
+    with m.db() as conn:
+        conn.execute("INSERT INTO content_items (id,platform,content_type,title,account_name,media_url,recognize_status,account_key,confirm_batch_id,created_at,updated_at) "
+                     "VALUES ('SP1','小红书','图片','t','城南优选','/tmp/x.jpg','pending','小红书:seller','B1',?,?)", (m.now(), m.now()))
+    m.recognize_content("SP1")  # 二次(有 batch) → 跑图像
+    assert calls["image"] == 1
+    with m.db() as conn:
+        types2 = {r["model_type"] for r in conn.execute("SELECT model_type FROM recognition_results WHERE content_id='SP1'").fetchall()}
+    assert "image" in types2
+
+
+def test_batch_receive_resets_to_pending(tmp_path):
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    m.AUTO_RECOGNIZE = False
+    post = {"date": "2026-06-04", "url": "https://x/rp", "title": "t", "id": "rp", "videoUrl": None, "imageList": [],
+            "author": {"id": "seller", "nickname": "城南优选"}, "content": "c", "comments": []}
+    push_result = m.api_crawler_push({"platform": "小红书", "type": "note", "data": [post]})
+    cid = push_result["content_ids"][0]  # Get the actual ID of the pushed content
+    with m.db() as conn:
+        conn.execute("UPDATE content_items SET recognize_status='completed' WHERE id=?", (cid,))
+    m.api_receive_user_posts({"platform": "小红书", "type": "note",
+                              "user": {"id": "seller", "nickname": "城南优选"}, "data": [post]})
+    with m.db() as conn:
+        row = conn.execute("SELECT recognize_status, confirm_batch_id FROM content_items WHERE id=?", (cid,)).fetchone()
+    assert row["recognize_status"] == "pending"
+    assert row["confirm_batch_id"]

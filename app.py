@@ -1563,21 +1563,24 @@ def recognize_content(content_id):
     audio_score = 0
     image_result = None
     audio_result = None
-    media_path = resolve_media_path(content["media_url"])
-    media_ext = media_path.suffix.lower() if media_path else ""
-    is_visual_media = content["content_type"] in {"图片", "视频"} or media_ext in {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".mp4", ".mov", ".avi", ".mkv"}
-    is_audio_media = content["content_type"] in {"音频", "视频"} or media_ext in {".wav", ".mp3", ".m4a", ".aac", ".flac", ".mp4", ".mov", ".avi", ".mkv"}
-    if is_visual_media:
-        image_result = analyze_image_with_vision({"content_id": content_id, "image_url": content["media_url"], "media_type": "video" if content["content_type"] == "视频" else "image"})
-        image_score = image_result["image_risk_score"]
-    if is_audio_media and media_path:
-        try:
-            audio_result = audio_service_analyze_media(content, media_path)
-        except Exception as exc:
-            audio_result = analyze_audio({"content_id": content_id, "audio_url": content["media_url"]})
-            audio_result["service_mode"] = "local-audio-fallback"
-            audio_result["audio_service_error"] = str(exc)
-        audio_score = audio_result["audio_risk_score"]
+    # 识别分流：首次识别(无 confirm_batch_id)只跑 LLM 文本粗筛；
+    # 二次确认批次(有 confirm_batch_id)才对高危账户的帖子跑图像/视频/语音多模态。
+    if content.get("confirm_batch_id"):
+        media_path = resolve_media_path(content["media_url"])
+        media_ext = media_path.suffix.lower() if media_path else ""
+        is_visual_media = content["content_type"] in {"图片", "视频"} or media_ext in {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".mp4", ".mov", ".avi", ".mkv"}
+        is_audio_media = content["content_type"] in {"音频", "视频"} or media_ext in {".wav", ".mp3", ".m4a", ".aac", ".flac", ".mp4", ".mov", ".avi", ".mkv"}
+        if is_visual_media:
+            image_result = analyze_image_with_vision({"content_id": content_id, "image_url": content["media_url"], "media_type": "video" if content["content_type"] == "视频" else "image"})
+            image_score = image_result["image_risk_score"]
+        if is_audio_media and media_path:
+            try:
+                audio_result = audio_service_analyze_media(content, media_path)
+            except Exception as exc:
+                audio_result = analyze_audio({"content_id": content_id, "audio_url": content["media_url"]})
+                audio_result["service_mode"] = "local-audio-fallback"
+                audio_result["audio_service_error"] = str(exc)
+            audio_score = audio_result["audio_risk_score"]
     account_score = 0.70 if any(w in content["account_name"] for w in ["同城", "优选", "生活馆"]) else 0.25
     fusion = analyze_fusion({
         "content_id": content_id,
@@ -2453,7 +2456,7 @@ def api_receive_user_posts(payload):
     content_ids = push.get("content_ids", []) if isinstance(push, dict) else []
     with db() as conn:
         for cid in content_ids:
-            conn.execute("UPDATE content_items SET account_key=?, confirm_batch_id=?, updated_at=? WHERE id=?",
+            conn.execute("UPDATE content_items SET account_key=?, confirm_batch_id=?, recognize_status='pending', updated_at=? WHERE id=?",
                          (key, batch_id, now(), cid))
         upsert_account(platform, user_id, user=body_user, status="recognizing", batch_id=batch_id, conn=conn)
     trigger_auto_recognize()
