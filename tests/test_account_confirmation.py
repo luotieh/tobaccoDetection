@@ -479,3 +479,34 @@ def test_dismissed_account_dedups_after_reopen(tmp_path, monkeypatch):
     m.feedback_high_risk_account(content)
     assert len(posted) == 1                 # 只上报一次(不再每帖 flood)
     assert m.get_account("小红书:seller")["confirm_status"] == "awaiting_posts"
+
+
+def test_api_contents_pass_filter(tmp_path):
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()  # init_db 播种首次内容(confirm_batch_id='')
+    with m.db() as conn:
+        conn.execute("INSERT INTO content_items (id,platform,content_type,title,account_name,recognize_status,"
+                     "confirm_batch_id,created_at,updated_at,collect_time) "
+                     "VALUES ('SP1','小红书','图片','t','a','completed','B1',?,?,?)", (m.now(), m.now(), m.now()))
+    first = m.api_contents({"pass": "first", "page_size": "500"})
+    second = m.api_contents({"pass": "second", "page_size": "500"})
+    first_ids = {r["id"] for r in first["items"]}
+    second_ids = {r["id"] for r in second["items"]}
+    assert "SP1" in second_ids and "SP1" not in first_ids
+    assert first_ids and all(not r.get("confirm_batch_id") for r in first["items"])
+
+
+def test_account_review_confirm_one_click_push(tmp_path):
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    m.upsert_account("小红书", "seller", status="pending_review", batch_id="B1")
+    with m.db() as conn:
+        conn.execute("INSERT INTO content_items (id,platform,content_type,title,account_name,risk_score,risk_level,"
+                     "recognize_status,account_key,confirm_batch_id,created_at,updated_at) "
+                     "VALUES ('B1_0','小红书','文本','t','城南优选',0.9,'高风险','completed','小红书:seller','B1',?,?)", (m.now(), m.now()))
+    res = m.api_account_review("小红书:seller", {"review_status": "confirmed", "reviewer": "张三"})
+    assert res["success"] and res["report_path"]
+    assert res["push"] is not None                       # 一键推送返回了推送结果
+    with m.db() as conn:
+        pushes = m.rows_to_list(conn.execute("SELECT * FROM push_logs WHERE content_id=?", ("小红书:seller",)).fetchall())
+    assert len(pushes) == 1                              # push_logs 落了一条(不论 mock 成败)

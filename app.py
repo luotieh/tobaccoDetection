@@ -2195,6 +2195,10 @@ def api_contents(qs):
         where += " AND (title LIKE ? OR raw_text LIKE ? OR account_name LIKE ?)"
         kw = f"%{qs['keyword']}%"
         args.extend([kw, kw, kw])
+    if qs.get("pass") == "first":
+        where += " AND (confirm_batch_id IS NULL OR confirm_batch_id='')"
+    elif qs.get("pass") == "second":
+        where += " AND confirm_batch_id<>''"
 
     page, page_size, offset = pagination_params(qs)
 
@@ -2894,12 +2898,19 @@ def api_account_review(account_key, payload):
                      (status, first_text(payload.get("reviewer"), "审核员"),
                       first_text(payload.get("review_opinion")), now(), now(), account_key))
     report_rel = None
+    push_result = None
     if status == "confirmed":
         try:
             report_rel = generate_account_report(account_key)
         except Exception as exc:
             sys.stderr.write("[account-report] %s 生成失败: %s\n" % (account_key, exc))
-    return {"success": True, "account_key": account_key, "confirm_status": status, "report_path": report_rel}
+        try:
+            push = api_create_push(account_key)
+            push_result = api_send_push(push["id"])
+        except Exception as exc:
+            sys.stderr.write("[account-push] %s 推送监管失败: %s\n" % (account_key, exc))
+    return {"success": True, "account_key": account_key, "confirm_status": status,
+            "report_path": report_rel, "push": push_result}
 
 
 def api_account_report(account_key):
