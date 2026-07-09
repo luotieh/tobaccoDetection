@@ -2789,13 +2789,11 @@ def maybe_finalize_confirm_batch(content):
     aggregate_account_confirmation(account_key, batch_id, rows)
 
 
-def generate_account_report(account_key):
-    """组装账户 + 批次帖子识别结果 + 证据文件，渲染 HTML 落盘，返回相对路径。"""
+def assemble_account_posts(account):
+    """组装某账户当前批次的帖子 + 多模态识别结果(text/image/audio/fusion) + 证据文件路径。
+    供 api_account_detail 展示与 generate_account_report 渲染共用。"""
+    batch_id = (account or {}).get("confirm_batch_id")
     with db() as conn:
-        account = row_to_dict(conn.execute("SELECT * FROM accounts WHERE account_key=?", (account_key,)).fetchone())
-        if not account:
-            return None
-        batch_id = account["confirm_batch_id"]
         contents = rows_to_list(conn.execute(
             "SELECT * FROM content_items WHERE confirm_batch_id=? ORDER BY risk_score DESC", (batch_id,)).fetchall())
         results = {}
@@ -2815,6 +2813,24 @@ def generate_account_report(account_key):
             "evidence_images": [str(p) for p in sorted(ev_dir.glob("*.jpg"))] if ev_dir.exists() else [],
             "evidence_audio": [str(p) for p in sorted(audio_dir.glob("*.wav"))] if audio_dir.exists() else [],
         })
+    return posts
+
+
+def account_evidence_url(abs_path):
+    """把证据文件绝对路径转成前端可访问的 /storage/... URL(经现有静态路由)。"""
+    try:
+        return "/" + str(Path(abs_path).resolve().relative_to(ROOT))
+    except (ValueError, OSError):
+        return ""
+
+
+def generate_account_report(account_key):
+    """组装账户 + 批次帖子识别结果 + 证据文件，渲染 HTML 落盘，返回相对路径。"""
+    account = get_account(account_key)
+    if not account:
+        return None
+    batch_id = account["confirm_batch_id"]
+    posts = assemble_account_posts(account)
     html_str = account_report.build_account_report_html(account, posts)
     safe_key = account_key.replace(":", "_").replace("/", "_")
     report_dir = ROOT / "storage" / "reports" / safe_key
@@ -2841,13 +2857,20 @@ def api_accounts(qs):
 
 
 def api_account_detail(account_key):
-    with db() as conn:
-        account = row_to_dict(conn.execute("SELECT * FROM accounts WHERE account_key=?", (account_key,)).fetchone())
-        if not account:
-            return None
-        account["posts"] = rows_to_list(conn.execute(
-            "SELECT id, title, content_type, content_url, risk_score, risk_level, recognize_status "
-            "FROM content_items WHERE confirm_batch_id=? ORDER BY risk_score DESC", (account["confirm_batch_id"],)).fetchall())
+    account = get_account(account_key)
+    if not account:
+        return None
+    posts = []
+    for p in assemble_account_posts(account):
+        c = p["content"]
+        posts.append({
+            "id": c["id"], "title": c["title"], "content_type": c["content_type"],
+            "content_url": c["content_url"], "risk_score": c["risk_score"],
+            "risk_level": c["risk_level"], "recognize_status": c["recognize_status"],
+            "text": p["text"], "image": p["image"], "audio": p["audio"], "fusion": p["fusion"],
+            "evidence_images": [u for u in (account_evidence_url(x) for x in p["evidence_images"]) if u],
+        })
+    account["posts"] = posts
     account["violation_type_parsed"] = json_loads(account.get("violation_type"), [])
     return account
 

@@ -415,3 +415,37 @@ def test_dismissed_account_reportable_again(tmp_path, monkeypatch):
     m.upsert_account("小红书", "seller", status="dismissed")  # 人工误报
     m.feedback_high_risk_account(content)  # dismissed 不在流程中 → 可再次上报
     assert len(posted) == 2
+
+
+def test_account_detail_includes_multimodal(tmp_path):
+    import json
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    m.upsert_account("小红书", "seller", user={"nickname": "城南优选"}, status="pending_review", batch_id="B1")
+    with m.db() as conn:
+        conn.execute("INSERT INTO content_items (id,platform,content_type,title,account_name,risk_score,risk_level,recognize_status,account_key,confirm_batch_id,created_at,updated_at) "
+                     "VALUES ('B1_0','小红书','图片','刚到一批','城南优选',0.9,'高风险','completed','小红书:seller','B1',?,?)", (m.now(), m.now()))
+        for typ, data in [("text", {"hit_keywords": [{"word": "私信"}], "intent_type": "疑似交易引流", "model_version": "t"}),
+                          ("image", {"detected_objects": ["香烟包装"], "ocr_text": ["私聊"], "model_version": "i"}),
+                          ("fusion", {"risk_score": 0.9, "model_version": "f"})]:
+            conn.execute("INSERT INTO recognition_results VALUES (?,?,?,?,?,?,?)",
+                         (m.new_id("RR"), "B1_0", typ, "v", 0.9, json.dumps(data, ensure_ascii=False), m.now()))
+    detail = m.api_account_detail("小红书:seller")
+    posts = detail["posts"]
+    assert len(posts) == 1
+    p = posts[0]
+    assert p["text"]["intent_type"] == "疑似交易引流"
+    assert p["image"]["detected_objects"] == ["香烟包装"]
+    assert p["fusion"]["risk_score"] == 0.9
+    assert p["id"] == "B1_0" and p["risk_level"] == "高风险"
+
+
+def test_assemble_account_posts_returns_batch(tmp_path):
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    m.upsert_account("小红书", "seller", status="pending_review", batch_id="B1")
+    with m.db() as conn:
+        conn.execute("INSERT INTO content_items (id,platform,content_type,title,account_name,risk_score,risk_level,recognize_status,account_key,confirm_batch_id,created_at,updated_at) "
+                     "VALUES ('B1_0','小红书','文本','t','城南优选',0.9,'高风险','completed','小红书:seller','B1',?,?)", (m.now(), m.now()))
+    posts = m.assemble_account_posts(m.get_account("小红书:seller"))
+    assert len(posts) == 1 and posts[0]["content"]["id"] == "B1_0"
