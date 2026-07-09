@@ -87,7 +87,9 @@ def now():
 
 
 def new_id(prefix):
-    return f"{prefix}{datetime.now().strftime('%Y%m%d%H%M%S')}{random.randint(100, 999)}"
+    # 秒级时间戳(可读/可排序) + uuid 片段(避免同一秒内大量插入碰撞)。
+    # 旧版仅 3 位随机数：drain 单秒识别多条时 recognition_results.id 会 UNIQUE 冲突导致误判 failed。
+    return f"{prefix}{datetime.now().strftime('%Y%m%d%H%M%S')}{uuid.uuid4().hex[:12]}"
 
 
 DB_BUSY_TIMEOUT_MS = int(os.environ.get("DB_BUSY_TIMEOUT_MS", "15000"))
@@ -1670,6 +1672,10 @@ def drain_pending_recognition():
                         "UPDATE content_items SET recognize_status='failed', updated_at=? WHERE id=?",
                         (now(), content_id),
                     )
+                    failed_row = row_to_dict(conn.execute(
+                        "SELECT account_key, confirm_batch_id FROM content_items WHERE id=?", (content_id,)).fetchone())
+                # 失败帖也可能是二次确认批次里最后一条到终态者：仍需触发账户聚合，避免账户卡在 recognizing
+                maybe_finalize_confirm_batch(failed_row)
             except Exception:
                 pass
 
@@ -2036,8 +2042,8 @@ class Handler(BaseHTTPRequestHandler):
                 if result.get("created"):
                     trigger_auto_recognize()
                 return self.send_json(result, 201 if result.get("success") else 400)
-            if m := re.match(r"^/api/users/([^/]+)/([^/]+)$", path):
-                result = api_receive_user_posts(unquote(m.group(1)), unquote(m.group(2)), payload)
+            if path == "/api/crawler/account-posts":
+                result = api_receive_user_posts(payload)
                 return self.send_json(result, 202 if result.get("success") else 400)
             if m := re.match(r"^/api/accounts/([^/]+)/review$", path):
                 return self.send_json(api_account_review(unquote(m.group(1)), payload))
@@ -2427,18 +2433,17 @@ def api_crawler_push(payload):
     return {"success": True, "accepted": len(accepted), "created": created, "updated": updated, "content_ids": accepted}
 
 
-def api_receive_user_posts(platform, user_id, payload):
-    """阶段③接收：爬虫回推某高危账户近 10 条多模态帖子（ReturnDataUser）。
-    校验 → 建/更新账户(recognizing) → 生成批次 → 复用 crawler_push 入库并打批次标记 → 触发异步识别。"""
+def api_receive_user_posts(payload):
+    """阶段③接收：被动接收爬虫回推的某高危账户近 10 条多模态帖子（ReturnDataUser）。
+    platform / user_id 取自 body（不再走 URL，避免与 body 字段重复）→ 校验 → 建/更新账户(recognizing)
+    → 生成批次 → 复用 crawler_push 入库并打批次标记 → 触发异步识别。"""
     if not isinstance(payload, dict):
         return {"error": "payload 必须为对象"}
     body_user = payload.get("user") if isinstance(payload.get("user"), dict) else {}
-    body_uid = first_text(body_user.get("id"))
-    body_platform = first_text(payload.get("platform"))
-    if body_uid and body_uid != user_id:
-        return {"error": "path user_id 与 body user.id 不一致"}
-    if body_platform and body_platform != platform:
-        return {"error": "path platform 与 body platform 不一致"}
+    user_id = first_text(body_user.get("id"))
+    platform = first_text(payload.get("platform"))
+    if not platform or not user_id:
+        return {"error": "缺少 platform 或 user.id"}
     items = payload.get("data")
     if not isinstance(items, list) or not items:
         return {"error": "data 必须为非空列表"}

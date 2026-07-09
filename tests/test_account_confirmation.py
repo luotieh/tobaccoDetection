@@ -63,7 +63,7 @@ def test_receive_user_posts_ingests_and_tags_batch(tmp_path):
     m.DB_PATH = tmp_path / "demo.db"
     m.init_db()
     m.AUTO_RECOGNIZE = False  # 不启后台线程，保持确定性
-    res = m.api_receive_user_posts("小红书", "seller", _return_data_user(3))
+    res = m.api_receive_user_posts(_return_data_user(3))
     assert res["success"] is True
     assert res["accepted"] == 3
     assert res["account_key"] == "小红书:seller"
@@ -79,12 +79,17 @@ def test_receive_user_posts_ingests_and_tags_batch(tmp_path):
     assert all(r["recognize_status"] == "pending" for r in rows)
 
 
-def test_receive_user_posts_rejects_path_body_mismatch(tmp_path):
+def test_receive_user_posts_rejects_missing_identity(tmp_path):
     m = load_app()
     m.DB_PATH = tmp_path / "demo.db"
     m.init_db()
-    res = m.api_receive_user_posts("小红书", "OTHER", _return_data_user(1))
-    assert "error" in res and not res.get("success")
+    # platform / user.id 现在只来自 body，缺任一即拒绝(不再有 URL 路径参数)
+    missing_uid = _return_data_user(1)
+    missing_uid["user"] = {"id": "", "nickname": "x"}
+    assert not m.api_receive_user_posts(missing_uid).get("success")
+    missing_platform = _return_data_user(1)
+    missing_platform["platform"] = ""
+    assert not m.api_receive_user_posts(missing_platform).get("success")
 
 
 def test_batch_content_excluded_from_content_review_queue(tmp_path):
@@ -92,7 +97,7 @@ def test_batch_content_excluded_from_content_review_queue(tmp_path):
     m.DB_PATH = tmp_path / "demo.db"
     m.init_db()
     m.AUTO_RECOGNIZE = False
-    res = m.api_receive_user_posts("小红书", "seller", _return_data_user(2))
+    res = m.api_receive_user_posts(_return_data_user(2))
     batch = res["confirm_batch_id"]
     # 把批次内容置为高风险，验证仍不进内容审核队列
     with m.db() as conn:
@@ -291,7 +296,7 @@ def test_end_to_end_receive_recognize_confirm_report(tmp_path, monkeypatch):
                          "videoUrl": None, "imageList": [],
                          "author": {"id": "seller", "nickname": "城南优选", "description": "主页有方式", "avatarUrl": ""},
                          "content": "刚到一批，老客户私信", "comments": []} for i in range(3)]}
-    res = m.api_receive_user_posts("小红书", "seller", payload)
+    res = m.api_receive_user_posts(payload)
     assert res["success"] and res["accepted"] == 3
     m.drain_pending_recognition()                       # 同步处理识别队列 → 触发聚合
     acc = m.get_account("小红书:seller")
@@ -300,3 +305,34 @@ def test_end_to_end_receive_recognize_confirm_report(tmp_path, monkeypatch):
     review = m.api_account_review("小红书:seller", {"review_status": "confirmed", "reviewer": "张三"})
     assert review["report_path"]
     assert (m.ROOT / review["report_path"]).exists()
+
+
+def test_new_id_unique_under_rapid_same_second_calls():
+    # 回归：旧版 new_id 仅 3 位随机数，单秒内大量插入(如 drain 连续识别多条的 recognition_results)
+    # 会 UNIQUE 冲突。5000 次快速调用必落在同一秒的时间戳前缀，故只有后缀能区分。
+    m = load_app()
+    ids = [m.new_id("RR") for _ in range(5000)]
+    assert len(set(ids)) == len(ids)
+
+
+def test_failed_post_still_finalizes_batch(tmp_path, monkeypatch):
+    # 回归：批次里某帖识别抛异常被标 failed 时，drain 也要触发账户聚合，
+    # 否则该帖恰为最后一条到终态者时账户会永远卡在 recognizing。
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"
+    m.init_db()
+    m.upsert_account("小红书", "seller", status="recognizing", batch_id="BF1")
+    with m.db() as conn:
+        for i, (st, lvl, sc) in enumerate([("completed", "高风险", 0.9), ("completed", "高风险", 0.9), ("pending", "无风险", 0.0)]):
+            conn.execute("INSERT INTO content_items (id,platform,content_type,title,account_name,recognize_status,"
+                         "risk_score,risk_level,account_key,confirm_batch_id,created_at,updated_at) "
+                         "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                         (f"BF1_{i}", "小红书", "文本", "t", "城南优选", st, sc, lvl, "小红书:seller", "BF1", m.now(), m.now()))
+
+    def boom(cid):
+        raise RuntimeError("recognition boom")
+
+    monkeypatch.setattr(m, "recognize_content", boom)
+    m.drain_pending_recognition()
+    # 2 条 completed 高风险 → 双信号命中 → pending_review，而非卡在 recognizing
+    assert m.get_account("小红书:seller")["confirm_status"] == "pending_review"
