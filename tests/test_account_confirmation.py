@@ -510,3 +510,17 @@ def test_account_review_confirm_one_click_push(tmp_path):
     with m.db() as conn:
         pushes = m.rows_to_list(conn.execute("SELECT * FROM push_logs WHERE content_id=?", ("小红书:seller",)).fetchall())
     assert len(pushes) == 1                              # push_logs 落了一条(不论 mock 成败)
+
+
+def test_api_push_resolves_account_level_rows(tmp_path):
+    """回归：账户级一键推送把 account_key 存进 push_logs.content_id，api_push 原先只
+    LEFT JOIN content_items，account_key 匹配不到内容行 → title/risk_level 为 NULL，
+    前端把已确认高风险账户的推送误标为「无风险」。"""
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    m.upsert_account("小红书", "seller", user={"nickname": "城南优选"}, status="confirmed", batch_id="B1")
+    m.api_create_push("小红书:seller")  # 账户级推送：content_id 存 account_key
+    items = m.api_push({"page_size": "50"})["items"]
+    row = next(r for r in items if r["content_id"] == "小红书:seller")
+    assert row["title"] == "城南优选"      # 解析出账户昵称，不再空
+    assert row["risk_level"] == "高风险"   # 不再误标「无风险」

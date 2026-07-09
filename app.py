@@ -3131,8 +3131,14 @@ def api_push(qs):
     page, page_size, offset = pagination_params(qs)
     with db() as conn:
         total = conn.execute("SELECT COUNT(*) FROM push_logs").fetchone()[0]
-        rows = rows_to_list(conn.execute("""SELECT p.*,c.title,c.platform,c.risk_level FROM push_logs p
-            LEFT JOIN content_items c ON c.id=p.content_id ORDER BY COALESCE(p.push_time,''), p.id DESC LIMIT ? OFFSET ?""",
+        rows = rows_to_list(conn.execute("""SELECT p.*,
+            COALESCE(c.title, a.nickname) AS title,
+            COALESCE(c.platform, a.platform) AS platform,
+            COALESCE(c.risk_level, CASE WHEN a.account_key IS NOT NULL THEN '高风险' ELSE '' END) AS risk_level
+            FROM push_logs p
+            LEFT JOIN content_items c ON c.id=p.content_id
+            LEFT JOIN accounts a ON a.account_key=p.content_id
+            ORDER BY COALESCE(p.push_time,''), p.id DESC LIMIT ? OFFSET ?""",
             (page_size, offset)).fetchall())
     return {"items": rows, "total": total, "page": page, "page_size": page_size}
 
