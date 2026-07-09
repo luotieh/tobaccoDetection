@@ -387,3 +387,31 @@ def test_batch_receive_resets_to_pending(tmp_path):
         row = conn.execute("SELECT recognize_status, confirm_batch_id FROM content_items WHERE id=?", (cid,)).fetchone()
     assert row["recognize_status"] == "pending"
     assert row["confirm_batch_id"]
+
+
+def test_account_level_dedup_reports_once(tmp_path, monkeypatch):
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    posted = []
+    monkeypatch.setattr(m, "post_crawler_user_risk",
+                        lambda platform, uid, score, timeout=5: (posted.append((platform, uid)) or {"ok": True, "status_code": 200, "response": ""}))
+    content = {"platform": "小红书", "risk_score": 0.9, "author_json": '{"id": "seller", "nickname": "城南优选"}'}
+    m.feedback_high_risk_account(content)
+    m.feedback_high_risk_account(content)
+    m.feedback_high_risk_account(content)
+    assert posted == [("小红书", "seller")]  # 同账户只上报一次
+    assert m.get_account("小红书:seller")["confirm_status"] == "awaiting_posts"
+
+
+def test_dismissed_account_reportable_again(tmp_path, monkeypatch):
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    posted = []
+    monkeypatch.setattr(m, "post_crawler_user_risk",
+                        lambda platform, uid, score, timeout=5: (posted.append(uid) or {"ok": True}))
+    content = {"platform": "小红书", "risk_score": 0.9, "author_json": '{"id": "seller"}'}
+    m.feedback_high_risk_account(content)
+    assert len(posted) == 1
+    m.upsert_account("小红书", "seller", status="dismissed")  # 人工误报
+    m.feedback_high_risk_account(content)  # dismissed 不在流程中 → 可再次上报
+    assert len(posted) == 2

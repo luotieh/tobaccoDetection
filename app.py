@@ -2910,6 +2910,12 @@ def post_crawler_user_risk(platform, user_id, risk_score, timeout=5):
         conn.close()
 
 
+def account_already_in_pipeline(account_key):
+    """账户是否已在二次确认流程中(已上报/识别中/待审/已确认)。用于账户级去重，避免同一账户重复上报爬虫。"""
+    acc = get_account(account_key)
+    return bool(acc) and acc.get("confirm_status") in ("awaiting_posts", "recognizing", "pending_review", "confirmed")
+
+
 def feedback_high_risk_account(content):
     """审核确认后把高风险账户(平台/用户id/风险分)反馈给爬虫端；尽力而为，失败不阻塞审核。"""
     platform = content.get("platform") or ""
@@ -2917,6 +2923,8 @@ def feedback_high_risk_account(content):
     risk_score = content.get("risk_score") or 0
     if not user_id:
         return {"ok": False, "skipped": True, "reason": "缺少账户用户ID(author_json.id)", "platform": platform}
+    if account_already_in_pipeline(account_key_of(platform, user_id)):
+        return {"ok": True, "skipped": True, "reason": "账户已在二次确认流程中", "platform": platform, "id": user_id}
     try:
         upsert_account(platform, user_id, status="awaiting_posts")
     except Exception as exc:
@@ -3042,6 +3050,15 @@ def feedback_high_risk_comment_users(content):
             best[uid] = {"score": round(score, 4), "comment_level": level}
     feedbacks = []
     for uid, info in best.items():
+        if account_already_in_pipeline(account_key_of(platform, uid)):
+            feedbacks.append({"platform": platform, "id": uid, "risk_score": info["score"],
+                              "comment_level": info["comment_level"], "ok": True, "skipped": True,
+                              "reason": "账户已在二次确认流程中"})
+            continue
+        try:
+            upsert_account(platform, uid, status="awaiting_posts")
+        except Exception as exc:
+            sys.stderr.write("[account] upsert awaiting 失败 %s/%s: %s\n" % (platform, uid, exc))
         try:
             result = post_crawler_user_risk(platform, uid, info["score"])
             if not result.get("ok"):
