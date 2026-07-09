@@ -1226,6 +1226,31 @@ function accountPostsTable(rows) {
   </tr>`).join("")}</tbody></table>`;
 }
 
+// 逐帖多模态证据卡片：汇总 text/image/audio/fusion 识别结果与证据帧，供账户详情页在概览表下方展开。
+function accountPostMultimodal(p) {
+  const parts = [];
+  const kw = ((p.text && p.text.hit_keywords) || []).map(h => (h && typeof h === "object") ? h.word : h).filter(Boolean);
+  if (kw.length) parts.push(`<div><b>文本命中：</b>${escapeHtml(kw.join("、"))}</div>`);
+  if (p.text && p.text.intent_type) parts.push(`<div><b>交易意图：</b>${escapeHtml(p.text.intent_type)}</div>`);
+  const objs = (p.image && p.image.detected_objects) || [];
+  if (objs.length) parts.push(`<div><b>检测对象：</b>${escapeHtml(objs.join("、"))}</div>`);
+  const ocr = (p.image && p.image.ocr_text) || [];
+  if (ocr.length) parts.push(`<div><b>OCR：</b>${escapeHtml(ocr.join("、"))}</div>`);
+  if (p.audio && p.audio.transcript) parts.push(`<div><b>语音转写：</b>${escapeHtml(p.audio.transcript)}</div>`);
+  const violation = (p.fusion && p.fusion.violation_type) || [];
+  if (violation.length) parts.push(`<div><b>融合结论：</b>${escapeHtml(violation.join("、"))}</div>`);
+  if (p.fusion && p.fusion.model_explanation) parts.push(`<div><b>融合说明：</b>${escapeHtml(p.fusion.model_explanation)}</div>`);
+  const imgs = (p.evidence_images || [])
+    .map(u => `<img src="${escapeHtml(u)}" alt="证据帧" style="max-width:160px;max-height:160px;margin:4px 4px 0 0;border:1px solid var(--line);border-radius:6px">`)
+    .join("");
+  if (imgs) parts.push(`<div>${imgs}</div>`);
+  const empty = `<p class="pre">${p.recognize_status === "completed" ? "该帖未命中多模态特征" : "识别尚未完成，暂无多模态结果"}</p>`;
+  return `<div class="result-box" style="margin-bottom:10px">
+    <h4 style="margin:0 0 8px">${escapeHtml(p.title || p.id)} ${riskTag(p.risk_level)} ${statusTag(p.recognize_status)} <span style="color:var(--muted)">${Number(p.risk_score || 0).toFixed(2)} 分</span></h4>
+    ${parts.join("") || empty}
+  </div>`;
+}
+
 async function renderAccountDetail(accountKey) {
   const enc = encodeURIComponent(accountKey);
   const safeKey = routeKey(accountKey);
@@ -1259,6 +1284,7 @@ async function renderAccountDetail(accountKey) {
       </div></div>
     </div>
     <div class="panel"><h3 class="section-title">批次帖子（${(acc.posts || []).length}）</h3><div class="table-wrap">${accountPostsTable(acc.posts || [])}</div></div>
+    <div class="panel"><h3 class="section-title">逐帖多模态证据</h3>${(acc.posts || []).map(accountPostMultimodal).join("") || "<p class=\"pre\">暂无帖子</p>"}</div>
   `;
 }
 
