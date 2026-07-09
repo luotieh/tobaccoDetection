@@ -2688,7 +2688,9 @@ def get_account(account_key):
 def _account_status_allows(current, new):
     # awaiting_posts 不回退已推进的状态；其余状态允许显式设置
     if new == "awaiting_posts":
-        return current in ("", "awaiting_posts")
+        # awaiting_posts 可从 空/自身/dismissed(误报后再高危需重开以便去重)推进；
+        # 但不得回退更靠后的活动态(recognizing/pending_review/confirmed)。
+        return current in ("", "awaiting_posts", "dismissed")
     return True
 
 
@@ -2793,6 +2795,10 @@ def assemble_account_posts(account):
     """组装某账户当前批次的帖子 + 多模态识别结果(text/image/audio/fusion) + 证据文件路径。
     供 api_account_detail 展示与 generate_account_report 渲染共用。"""
     batch_id = (account or {}).get("confirm_batch_id")
+    if not batch_id:
+        # confirm_batch_id 默认 ''，批次未开始的账户(如 awaiting_posts)不应匹配到
+        # 所有 confirm_batch_id='' 的首次内容(全库首轮识别行)，那会拖出整个首轮语料。
+        return []
     with db() as conn:
         contents = rows_to_list(conn.execute(
             "SELECT * FROM content_items WHERE confirm_batch_id=? ORDER BY risk_score DESC", (batch_id,)).fetchall())

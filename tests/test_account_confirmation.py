@@ -449,3 +449,33 @@ def test_assemble_account_posts_returns_batch(tmp_path):
                      "VALUES ('B1_0','小红书','文本','t','城南优选',0.9,'高风险','completed','小红书:seller','B1',?,?)", (m.now(), m.now()))
     posts = m.assemble_account_posts(m.get_account("小红书:seller"))
     assert len(posts) == 1 and posts[0]["content"]["id"] == "B1_0"
+
+
+def test_assemble_returns_empty_for_batchless_account(tmp_path):
+    """Fix 1 回归：confirm_batch_id 默认 ''，awaiting_posts 账户(尚未开批)不能匹配到
+    全库 confirm_batch_id='' 的首轮内容，否则 api_account_detail 会拖出整个首轮语料
+    (SELECT * 全字段 + N+1 recognition_results 查询 + 每行两次文件系统 glob)。"""
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()  # init_db seeds first-pass content (confirm_batch_id='')
+    m.upsert_account("小红书", "commenterX", status="awaiting_posts")  # confirm_batch_id=''
+    acc = m.get_account("小红书:commenterX")
+    assert not acc["confirm_batch_id"]
+    assert m.assemble_account_posts(acc) == []          # 不返回全部首次内容
+    assert m.api_account_detail("小红书:commenterX")["posts"] == []
+
+
+def test_dismissed_account_dedups_after_reopen(tmp_path, monkeypatch):
+    """Fix 2 回归：dismissed 账户再次高危时应重开为 awaiting_posts 并只上报一次，
+    此后同一账户的重复高危帖必须被去重(不能每帖都 flood 爬虫端)。"""
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    posted = []
+    monkeypatch.setattr(m, "post_crawler_user_risk",
+                        lambda platform, uid, score, timeout=5: (posted.append(uid) or {"ok": True}))
+    m.upsert_account("小红书", "seller", status="dismissed")
+    content = {"platform": "小红书", "risk_score": 0.9, "author_json": '{"id": "seller"}'}
+    m.feedback_high_risk_account(content)   # dismissed → 重开并上报一次
+    m.feedback_high_risk_account(content)   # 已 awaiting_posts → 去重
+    m.feedback_high_risk_account(content)
+    assert len(posted) == 1                 # 只上报一次(不再每帖 flood)
+    assert m.get_account("小红书:seller")["confirm_status"] == "awaiting_posts"
