@@ -1,14 +1,14 @@
 const state = { route: "dashboard", data: null };
 
 const menus = [
-  ["核心功能", [["dashboard", "工作台"], ["contents", "识别内容列表"], ["image-test", "图像识别测试"], ["text-test", "文本识别测试"], ["audio-test", "语音识别测试"]]],
+  ["核心功能", [["dashboard", "工作台"], ["image-test", "图像识别测试"], ["text-test", "文本识别测试"], ["audio-test", "语音识别测试"]]],
   ["配置管理", [["models", "模型配置"], ["text-llm", "LLM 文本配置"], ["fusion", "多模态融合配置"], ["rules", "规则词库"]]],
-  ["业务闭环", [["reviews", "审核管理"], ["accounts", "账户二次确认"], ["push", "推送管理"], ["users", "用户角色"]]],
+  ["业务闭环", [["contents", "表1 · 首次推送"], ["accounts", "表2 · 二次确认"], ["push", "推送管理"], ["users", "用户角色"]]],
 ];
 
 const titles = {
   dashboard: ["工作台", "数据概览与线索趋势"],
-  contents: ["识别内容列表", "管理待识别内容并执行 Mock 识别"],
+  contents: ["表1 · 首次推送", "管理待识别内容并执行 Mock 识别"],
   "image-test": ["图像识别测试", "上传图片调用 best.pt 目标检测接口"],
   "text-test": ["文本识别测试", "调用文本风险服务识别标题、正文、评论和 OCR/ASR 文本"],
   "audio-test": ["语音识别测试", "上传音频或视频调用语音风险服务"],
@@ -18,7 +18,7 @@ const titles = {
   fusion: ["多模态融合配置", "调整权重和风险等级阈值"],
   rules: ["规则词库", "维护关键词、黑话、品牌词、白名单和地域词"],
   reviews: ["审核管理", "处理中高风险待审核线索"],
-  accounts: ["账户二次确认", "处理命中双信号的高风险账户，确认违法或标记误报"],
+  accounts: ["表2 · 二次确认", "处理命中双信号的高风险账户，确认违法或标记误报"],
   account: ["账户详情", "查看批次帖子识别结果，确认违法或标记误报"],
   push: ["推送管理", "生成线索并模拟推送监管平台"],
   users: ["用户角色", "演示系统角色"],
@@ -126,6 +126,7 @@ function contentsQuery() {
   if ($("#platform")?.value) params.set("platform", $("#platform").value);
   if ($("#ctype")?.value) params.set("content_type", $("#ctype").value);
   if ($("#risk")?.value) params.set("risk_level", $("#risk").value);
+  params.set("pass", "first");
   params.set("page", contentsState.page);
   params.set("page_size", contentsState.page_size);
   return params;
@@ -158,6 +159,7 @@ async function renderContents() {
   const platformOpts = facetOptions(["抖音", "快手", "小红书", "微博"], facets.platforms);
   const ctypeOpts = facetOptions(["视频", "音频", "图片", "文本", "评论", "账号"], facets.content_types);
   $("#view").innerHTML = `
+    <div class="panel"><h3 class="section-title">表1 · 首次推送（文本粗筛）</h3><p class="pre">阶段①全自动：对爬虫首次推送的内容仅做 LLM 文本识别粗筛；识别为「高风险」的账户已自动上报爬虫做二次取证，回推的 10 条帖子进入「表2 · 二次确认」。</p></div>
     <div class="toolbar">
       <div><label><span>关键词</span><input id="kw" placeholder="标题/账号/正文" /></label></div>
       <div><label><span>平台</span><select id="platform">${platformOpts}</select></label></div>
@@ -468,10 +470,16 @@ async function runAudioTest() {
 
 function contentsTable(rows) {
   return `<table>
-    <thead><tr><th>编号</th><th>平台</th><th>类型</th><th>标题</th><th>账号</th><th>采集时间</th><th>识别</th><th>风险</th><th>审核</th><th>操作</th></tr></thead>
+    <thead><tr><th>平台</th><th>账号</th><th>标题/摘要</th><th>文本风险分</th><th>等级</th><th>识别状态</th><th>已上报爬虫</th><th>发布时间</th><th>操作</th></tr></thead>
     <tbody>${rows.map(r => `<tr>
-      <td>${r.id}</td><td>${escapeHtml(r.platform)}</td><td>${escapeHtml(r.content_type)}</td><td class="title-cell" title="${escapeHtml(r.title || "")}">${escapeHtml(r.title || "")}</td><td>${escapeHtml(r.account_name)}</td><td>${escapeHtml(r.collect_time)}</td>
-      <td>${statusTag(r.recognize_status)}</td><td>${riskTag(r.risk_level)} ${Number(r.risk_score || 0).toFixed(2)}</td><td>${statusTag(r.review_status)}</td>
+      <td>${escapeHtml(r.platform)}</td>
+      <td>${escapeHtml(r.account_name)}</td>
+      <td class="title-cell" title="${escapeHtml(r.title || "")}">${escapeHtml(r.title || "")}</td>
+      <td>${Number(r.risk_score || 0).toFixed(2)}</td>
+      <td>${riskTag(r.risk_level)}</td>
+      <td>${statusTag(r.recognize_status)}</td>
+      <td>${r.risk_level === "高风险" ? '<span class="tag" style="background:#fde8e8;color:#c0392b">已上报</span>' : "—"}</td>
+      <td>${escapeHtml(r.publish_time || "-")}</td>
       <td class="actions-cell">
         <button class="secondary" onclick="setRoute('detail/${r.id}')">查看</button>
         <button onclick="recognize('${r.id}')">识别</button>
