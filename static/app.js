@@ -98,7 +98,7 @@ function bars(rows) {
   const max = Math.max(1, ...rows.map(r => r.value));
   return rows.map(r => `
     <div class="bar-row">
-      <span>${r.name}</span><div class="bar"><span style="width:${r.value / max * 100}%"></span></div><b>${r.value}</b>
+      <span>${escapeHtml(r.name)}</span><div class="bar"><span style="width:${r.value / max * 100}%"></span></div><b>${r.value}</b>
     </div>
   `).join("") || `<p class="pre">暂无数据</p>`;
 }
@@ -1183,7 +1183,7 @@ async function importRulesFile() {
 const reviewsState = { page: 1, page_size: 20, total: 0 };
 
 function reviewsTable(rows) {
-  return `<table><thead><tr><th>内容编号</th><th>平台</th><th>标题</th><th>风险分</th><th>风险等级</th><th>审核状态</th><th>审核人</th><th>审核时间</th><th>操作</th></tr></thead><tbody>${rows.map(r => `<tr><td>${r.content_id}</td><td>${escapeHtml(r.platform)}</td><td class="title-cell" title="${escapeHtml(r.title || "")}">${escapeHtml(r.title || "")}</td><td>${Number(r.risk_score || 0).toFixed(2)}</td><td>${riskTag(r.risk_level)}</td><td>${statusTag(r.review_status)}</td><td>${escapeHtml(r.reviewer || "-")}</td><td>${escapeHtml(r.review_time || "-")}</td><td class="actions-cell"><button class="secondary" onclick="setRoute('detail/${r.content_id}')">查看</button><button onclick="openReview('${r.content_id}')">审核</button></td></tr>`).join("")}</tbody></table>`;
+  return `<table><thead><tr><th>内容编号</th><th>平台</th><th>标题</th><th>风险分</th><th>风险等级</th><th>审核状态</th><th>审核人</th><th>审核时间</th><th>操作</th></tr></thead><tbody>${rows.map(r => `<tr><td>${escapeHtml(r.content_id)}</td><td>${escapeHtml(r.platform)}</td><td class="title-cell" title="${escapeHtml(r.title || "")}">${escapeHtml(r.title || "")}</td><td>${Number(r.risk_score || 0).toFixed(2)}</td><td>${riskTag(r.risk_level)}</td><td>${statusTag(r.review_status)}</td><td>${escapeHtml(r.reviewer || "-")}</td><td>${escapeHtml(r.review_time || "-")}</td><td class="actions-cell"><button class="secondary" onclick="setRoute('detail/${r.content_id}')">查看</button><button onclick="openReview('${r.content_id}')">审核</button></td></tr>`).join("")}</tbody></table>`;
 }
 
 async function loadReviews() {
@@ -1235,7 +1235,7 @@ async function renderAccounts() {
 
 function accountPostsTable(rows) {
   return `<table><thead><tr><th>内容编号</th><th>类型</th><th>标题</th><th>风险分</th><th>风险等级</th><th>识别状态</th><th>操作</th></tr></thead><tbody>${rows.map(r => `<tr>
-    <td>${r.id}</td>
+    <td>${escapeHtml(r.id)}</td>
     <td>${escapeHtml(r.content_type)}</td>
     <td class="title-cell" title="${escapeHtml(r.title || "")}">${escapeHtml(r.title || "")}</td>
     <td>${Number(r.risk_score || 0).toFixed(2)}</td>
@@ -1319,7 +1319,11 @@ function openAccountReview(enc, status) {
   `);
 }
 
+let accountReviewSubmitting = false;
+
 async function saveAccountReview(enc, status) {
+  if (accountReviewSubmitting) return;  // 防双击：请求进行中直接早退，避免重复创建/发送监管推送
+  accountReviewSubmitting = true;
   try {
     const result = await api(`/api/accounts/${enc}/review`, { method: "POST", body: {
       review_status: status,
@@ -1342,13 +1346,15 @@ async function saveAccountReview(enc, status) {
     renderApp();
   } catch (err) {
     toast("提交失败：" + err.message);
+  } finally {
+    accountReviewSubmitting = false;
   }
 }
 
 const pushState = { page: 1, page_size: 20, total: 0 };
 
 function pushTable(rows) {
-  return `<table><thead><tr><th>推送编号</th><th>内容编号</th><th>标题</th><th>风险等级</th><th>报告编号</th><th>状态</th><th>推送时间</th><th>重试</th><th>错误</th><th>操作</th></tr></thead><tbody>${rows.map(r => `<tr><td>${r.id}</td><td>${r.content_id}</td><td class="title-cell" title="${escapeHtml(r.title || "")}">${escapeHtml(r.title || "")}</td><td>${riskTag(r.risk_level)}</td><td>${escapeHtml(r.report_id || "-")}</td><td>${statusTag(r.push_status)}</td><td>${escapeHtml(r.push_time || "-")}</td><td>${r.retry_count}</td><td>${escapeHtml(r.error_message || "")}</td><td><button onclick="sendPush('${r.id}')">推送监管平台</button></td></tr>`).join("")}</tbody></table>`;
+  return `<table><thead><tr><th>推送编号</th><th>内容编号</th><th>标题</th><th>风险等级</th><th>报告编号</th><th>状态</th><th>推送时间</th><th>重试</th><th>错误</th><th>操作</th></tr></thead><tbody>${rows.map(r => `<tr><td>${r.id}</td><td>${escapeHtml(r.content_id)}</td><td class="title-cell" title="${escapeHtml(r.title || "")}">${escapeHtml(r.title || "")}</td><td>${riskTag(r.risk_level)}</td><td>${escapeHtml(r.report_id || "-")}</td><td>${statusTag(r.push_status)}</td><td>${escapeHtml(r.push_time || "-")}</td><td>${r.retry_count}</td><td>${escapeHtml(r.error_message || "")}</td><td><button onclick="sendPush('${r.id}')">推送监管平台</button></td></tr>`).join("")}</tbody></table>`;
 }
 
 async function loadPush() {

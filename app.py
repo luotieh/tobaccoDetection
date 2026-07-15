@@ -2905,8 +2905,18 @@ def api_account_review(account_key, payload):
         except Exception as exc:
             sys.stderr.write("[account-report] %s 生成失败: %s\n" % (account_key, exc))
         try:
-            push = api_create_push(account_key)
-            push_result = api_send_push(push["id"])
+            # 幂等：重复确认(双击/请求重放)不得重复创建+发送推送；已存在该账户的推送行时直接
+            # 复用最新一条(push_logs 无 created_at，id 含 new_id 的可排序时间戳前缀，故按 id 取最新)，
+            # 失败的推送仍按既有设计走「推送管理」页重试，不在此处重发。
+            with db() as conn:
+                existing_push = row_to_dict(conn.execute(
+                    "SELECT * FROM push_logs WHERE content_id=? ORDER BY id DESC",
+                    (account_key,)).fetchone())
+            if existing_push:
+                push_result = existing_push
+            else:
+                push = api_create_push(account_key)
+                push_result = api_send_push(push["id"])
         except Exception as exc:
             sys.stderr.write("[account-push] %s 推送监管失败: %s\n" % (account_key, exc))
     return {"success": True, "account_key": account_key, "confirm_status": status,

@@ -507,9 +507,29 @@ def test_account_review_confirm_one_click_push(tmp_path):
     res = m.api_account_review("小红书:seller", {"review_status": "confirmed", "reviewer": "张三"})
     assert res["success"] and res["report_path"]
     assert res["push"] is not None                       # 一键推送返回了推送结果
+    assert res["push"]["push_status"] in ("success", "failed")  # 确实调用了 api_send_push(不只是创建)
     with m.db() as conn:
         pushes = m.rows_to_list(conn.execute("SELECT * FROM push_logs WHERE content_id=?", ("小红书:seller",)).fetchall())
     assert len(pushes) == 1                              # push_logs 落了一条(不论 mock 成败)
+
+
+def test_account_review_confirm_twice_does_not_duplicate_push(tmp_path):
+    """幂等回归：重复确认(如前端双击/请求重放)不得重复创建+发送监管推送；push_logs 里该
+    account_key 的行数应恒为 1，第二次确认仍应带回既有推送信息(前端 toast 逻辑照常工作)。"""
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"; m.init_db()
+    m.upsert_account("小红书", "seller", status="pending_review", batch_id="B1")
+    with m.db() as conn:
+        conn.execute("INSERT INTO content_items (id,platform,content_type,title,account_name,risk_score,risk_level,"
+                     "recognize_status,account_key,confirm_batch_id,created_at,updated_at) "
+                     "VALUES ('B1_0','小红书','文本','t','城南优选',0.9,'高风险','completed','小红书:seller','B1',?,?)", (m.now(), m.now()))
+    res1 = m.api_account_review("小红书:seller", {"review_status": "confirmed", "reviewer": "张三"})
+    assert res1["push"] is not None
+    res2 = m.api_account_review("小红书:seller", {"review_status": "confirmed", "reviewer": "张三"})
+    assert res2["push"]                                   # 第二次仍非空，携带既有推送信息
+    with m.db() as conn:
+        pushes = m.rows_to_list(conn.execute("SELECT * FROM push_logs WHERE content_id=?", ("小红书:seller",)).fetchall())
+    assert len(pushes) == 1                               # 未重复创建推送行
 
 
 def test_api_push_resolves_account_level_rows(tmp_path):
