@@ -105,10 +105,21 @@ function bars(rows) {
 
 async function renderDashboard() {
   const data = await api("/api/dashboard");
+  let firstCount = 0, accs = { items: [] };
+  try { firstCount = (await api("/api/contents?pass=first&page_size=1")).total; } catch (e) { /* 忽略 */ }
+  try { accs = await api("/api/accounts"); } catch (e) { /* 忽略 */ }
+  const cnt = s => (accs.items || []).filter(a => a.confirm_status === s).length;
+  const funnel = {
+    "① 首次推送内容": firstCount,
+    "② 高危账户(待取证/识别中)": cnt("awaiting_posts") + cnt("recognizing"),
+    "③ 二次确认待审": cnt("pending_review"),
+    "④ 已确认已推送": cnt("confirmed"),
+  };
   $("#view").innerHTML = `
     <div class="cards">
       ${Object.entries(data.cards).map(([k, v]) => `<div class="card"><div class="metric-label">${k}</div><div class="metric-value">${v}</div></div>`).join("")}
     </div>
+    <div class="panel"><h3 class="section-title">两阶段处置漏斗</h3>${bars(Object.entries(funnel).map(([name, value]) => ({name, value})))}</div>
     <div class="grid-2">
       <div class="panel"><h3 class="section-title">平台来源分布</h3>${bars(data.platforms)}</div>
       <div class="panel"><h3 class="section-title">风险等级分布</h3>${bars(data.risks)}</div>
@@ -1217,7 +1228,7 @@ function accountsTable(rows) {
 async function renderAccounts() {
   const data = await api("/api/accounts?confirm_status=pending_review");
   $("#view").innerHTML = `
-    <div class="panel"><h3 class="section-title">待二次确认账户</h3><p class="pre">账户命中「高风险帖数量」或「单帖最高风险分」双信号之一后进入本队列，需人工复核确认违法或标记误报。</p></div>
+    <div class="panel"><h3 class="section-title">表2 · 二次确认（多模态）</h3><p class="pre">阶段②：爬虫回推的高危账户近 10 条帖子已做多模态二次分析。命中「高风险帖数量」或「单帖最高分」双信号之一进入本队列；「确认违法」将一键生成证据报告存档并推送监管平台，「误报」则排除。</p></div>
     <div class="table-wrap">${accountsTable(data.items)}</div>
   `;
 }
@@ -1318,7 +1329,13 @@ async function saveAccountReview(enc, status) {
     if (result.error) throw new Error(result.error);
     closeModal();
     if (status === "confirmed") {
-      toast(result.report_path ? "已确认违法，证据报告已生成" : "已确认违法（证据报告生成失败，可稍后重试）");
+      if (!result.report_path) {
+        toast("已确认违法（证据报告生成失败，可稍后重试）");
+      } else {
+        const pushed = result.push && result.push.push_status === "success";
+        toast(pushed ? "已确认违法 · 证据报告已存档 · 已推送监管平台"
+                     : "已确认违法 · 证据报告已存档（推送监管待重试，见推送管理）");
+      }
     } else {
       toast("已标记误报");
     }
