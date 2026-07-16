@@ -1624,21 +1624,41 @@ def recognize_content(content_id):
     # 识别分流：首次识别(无 confirm_batch_id)只跑 LLM 文本粗筛；
     # 二次确认批次(有 confirm_batch_id)才对高危账户的帖子跑图像/视频/语音多模态。
     if content.get("confirm_batch_id"):
-        media_path = resolve_media_path(content["media_url"])
-        media_ext = media_path.suffix.lower() if media_path else ""
-        is_visual_media = content["content_type"] in {"图片", "视频"} or media_ext in {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".mp4", ".mov", ".avi", ".mkv"}
-        is_audio_media = content["content_type"] in {"音频", "视频"} or media_ext in {".wav", ".mp3", ".m4a", ".aac", ".flac", ".mp4", ".mov", ".avi", ".mkv"}
-        if is_visual_media:
-            image_result = analyze_image_with_vision({"content_id": content_id, "image_url": content["media_url"], "media_type": "video" if content["content_type"] == "视频" else "image"})
-            image_score = image_result["image_risk_score"]
-        if is_audio_media and media_path:
-            try:
-                audio_result = audio_service_analyze_media(content, media_path)
-            except Exception as exc:
-                audio_result = analyze_audio({"content_id": content_id, "audio_url": content["media_url"]})
-                audio_result["service_mode"] = "local-audio-fallback"
-                audio_result["audio_service_error"] = str(exc)
-            audio_score = audio_result["audio_risk_score"]
+        media_url = content["media_url"] or ""
+        media_path = resolve_media_path(media_url)
+        downloaded_tmp = None
+        download_error = None
+        # 爬虫缓存链接：本地无此媒体且是 http(s) 时按需下载为临时文件（识别完即删）
+        if media_path is None and urlparse(media_url).scheme in {"http", "https"}:
+            url_ext = Path(urlparse(media_url).path).suffix.lower()
+            if content["content_type"] in {"图片", "视频", "音频"} or url_ext in MEDIA_SUFFIX_WHITELIST:
+                downloaded_tmp, download_error = download_media_to_temp(media_url, content["content_type"])
+                if download_error:
+                    sys.stderr.write("[media-download] %s 下载失败: %s\n" % (content_id, download_error))
+                media_path = downloaded_tmp
+        try:
+            media_ext = media_path.suffix.lower() if media_path else ""
+            is_visual_media = content["content_type"] in {"图片", "视频"} or media_ext in {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".mp4", ".mov", ".avi", ".mkv"}
+            is_audio_media = content["content_type"] in {"音频", "视频"} or media_ext in {".wav", ".mp3", ".m4a", ".aac", ".flac", ".mp4", ".mov", ".avi", ".mkv"}
+            if is_visual_media:
+                image_source = str(media_path) if media_path else media_url
+                image_result = analyze_image_with_vision({"content_id": content_id, "image_url": image_source, "media_type": "video" if content["content_type"] == "视频" else "image"})
+                if downloaded_tmp is not None:
+                    image_result["evidence_frame"] = media_url  # 临时文件会删除，证据帧字段回指爬虫缓存原链接
+                if download_error:
+                    image_result["download_error"] = download_error
+                image_score = image_result["image_risk_score"]
+            if is_audio_media and media_path:
+                try:
+                    audio_result = audio_service_analyze_media(content, media_path)
+                except Exception as exc:
+                    audio_result = analyze_audio({"content_id": content_id, "audio_url": media_url})
+                    audio_result["service_mode"] = "local-audio-fallback"
+                    audio_result["audio_service_error"] = str(exc)
+                audio_score = audio_result["audio_risk_score"]
+        finally:
+            if downloaded_tmp is not None:
+                downloaded_tmp.unlink(missing_ok=True)
     account_score = 0.70 if any(w in content["account_name"] for w in ["同城", "优选", "生活馆"]) else 0.25
     fusion = analyze_fusion({
         "content_id": content_id,
@@ -1650,6 +1670,8 @@ def recognize_content(content_id):
         "audio_available": audio_result is not None,
         "account_risk_score": account_score,
     })
+    if content.get("confirm_batch_id") and download_error:
+        fusion["download_error"] = download_error
     # 评论区结合帖子上下文逐条打分（仍在识别阶段，不占用数据库连接）
     comment_scores = score_content_comments(content)
     # 3) 写入阶段：仅短写事务（删旧结果+写结果+更新内容+落库评论分），写锁占用极短

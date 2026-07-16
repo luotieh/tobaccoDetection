@@ -105,3 +105,86 @@ def test_download_size_cap_aborts_and_cleans(media_server):
     path, err = m.download_media_to_temp(media_server + "/v.mp4", "视频")
     assert path is None and "上限" in err
     assert set(tmp_dir.glob("tobacco_media_*")) == before  # 半成品临时文件已清理
+
+
+def _prep_app(tmp_path):
+    """加载 app 模块 + 隔离库 + 屏蔽外部文本服务(用本地 analyze_text 兜底形状)。"""
+    m = load_app()
+    m.DB_PATH = tmp_path / "demo.db"
+    m.init_db()
+    m.text_service_analyze_content = lambda content: m.analyze_text(
+        {"content_id": content["id"], "text": content.get("raw_text") or content.get("title") or ""})
+    return m
+
+
+def _seed_batch_post(m, media_url, content_type="视频", cid="BM1"):
+    with m.db() as conn:
+        conn.execute(
+            "INSERT INTO content_items (id,platform,content_type,title,account_name,recognize_status,"
+            "account_key,confirm_batch_id,media_url,created_at,updated_at) "
+            "VALUES (?,?,?,'t','a','pending','小红书:u1','B9',?,?,?)",
+            (cid, "小红书", content_type, media_url, m.now(), m.now()))
+
+
+def _result_json(m, cid, model_type):
+    with m.db() as conn:
+        row = conn.execute(
+            "SELECT result_json FROM recognition_results WHERE content_id=? AND model_type=?",
+            (cid, model_type)).fetchone()
+    return json.loads(row["result_json"]) if row else None
+
+
+def test_batch_url_media_downloaded_fed_locally_and_cleaned(tmp_path, media_server):
+    m = _prep_app(tmp_path)
+    src = media_server + "/v.mp4"
+    seen = {}
+
+    def fake_vision(payload):
+        p = Path(payload["image_url"])
+        seen["vision_local"] = p.is_absolute() and p.exists()
+        seen["vision_path"] = p
+        return {"image_risk_score": 0.9, "detected_objects": [], "brand": "", "ocr_text": [],
+                "confidence": 0.9, "evidence_frame": payload["image_url"], "model_version": "test-v"}
+
+    def fake_audio(content, media_path):
+        seen["audio_local"] = Path(str(media_path)).exists()
+        return {"audio_risk_score": 0.8, "model_version": "test-a"}
+
+    m.analyze_image_with_vision = fake_vision
+    m.audio_service_analyze_media = fake_audio
+    _seed_batch_post(m, src, "视频")
+    m.recognize_content("BM1")
+
+    assert seen["vision_local"] and seen["audio_local"]          # 服务收到当时存在的本地文件
+    assert not seen["vision_path"].exists()                      # 识别后临时文件已删
+    with m.db() as conn:
+        row = conn.execute("SELECT recognize_status FROM content_items WHERE id='BM1'").fetchone()
+    assert row["recognize_status"] == "completed"
+    assert _result_json(m, "BM1", "image")["evidence_frame"] == src   # 回指原链接
+    assert "download_error" not in _result_json(m, "BM1", "fusion")
+
+
+def test_batch_url_download_failure_visible(tmp_path, media_server):
+    m = _prep_app(tmp_path)
+    _seed_batch_post(m, media_server + "/missing.mp4", "视频", cid="BM2")
+    m.recognize_content("BM2")
+    with m.db() as conn:
+        row = conn.execute("SELECT recognize_status FROM content_items WHERE id='BM2'").fetchone()
+    assert row["recognize_status"] == "completed"                # 失败不阻断识别
+    assert "download_error" in _result_json(m, "BM2", "image")   # mock 退化可见
+    assert "download_error" in _result_json(m, "BM2", "fusion")
+
+
+def test_first_pass_http_media_never_downloads(tmp_path, media_server):
+    m = _prep_app(tmp_path)
+    calls = []
+    original = m.download_media_to_temp
+    m.download_media_to_temp = lambda *a, **k: (calls.append(a), original(*a, **k))[1]
+    with m.db() as conn:
+        conn.execute(
+            "INSERT INTO content_items (id,platform,content_type,title,account_name,recognize_status,"
+            "media_url,created_at,updated_at) VALUES ('FP1','小红书','视频','t','a','pending',?,?,?)",
+            (media_server + "/v.mp4", m.now(), m.now()))
+    m.recognize_content("FP1")
+    assert calls == []                                           # 首轮(无批次)不下载
+    assert _result_json(m, "FP1", "image") is None               # 分流:首轮无 image 行
