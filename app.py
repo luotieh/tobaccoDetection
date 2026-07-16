@@ -188,15 +188,17 @@ def download_media_to_temp(media_url, content_type=""):
     """把爬虫缓存的媒体链接下载为本地临时文件，供多模态识别消费（用完由调用方删除）。
     返回 (Path, None) 或 (None, 错误描述)，不抛异常。
     守卫：仅 http/https；MEDIA_DOWNLOAD_MAX_MB 大小上限；MEDIA_DOWNLOAD_TIMEOUT_SECONDS 墙钟总时长。"""
-    parsed = urlparse(media_url or "")
-    if parsed.scheme not in {"http", "https"}:
-        return None, f"仅支持 http/https 媒体链接：{media_url or '(空)'}"
-    req = urllib.request.Request(
-        media_url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) TobaccoDetection/1.0"})
     max_bytes = MEDIA_DOWNLOAD_MAX_MB * 1024 * 1024
     started = time.monotonic()
     tmp = None
     try:
+        parsed = urlparse(media_url or "")
+        if parsed.scheme not in {"http", "https"}:
+            return None, f"仅支持 http/https 媒体链接：{media_url or '(空)'}"
+        req = urllib.request.Request(
+            media_url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) TobaccoDetection/1.0"})
+        # 爬虫缓存链接为内网直连；与 http.client 服务调用同策略，刻意不读代理环境变量
+        # （有代理变量的机器上，经代理拉内网媒体会被劫持/502——本地已实测）。
         proxy_handler = urllib.request.ProxyHandler({})
         opener = urllib.request.build_opener(proxy_handler)
         with opener.open(req, timeout=30) as resp:

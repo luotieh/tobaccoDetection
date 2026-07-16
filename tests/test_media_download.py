@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import tempfile
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -50,6 +51,7 @@ def media_server():
     thread.start()
     yield f"http://127.0.0.1:{srv.server_address[1]}"
     srv.shutdown()
+    srv.server_close()
 
 
 def test_download_success_suffix_from_url(media_server):
@@ -89,8 +91,17 @@ def test_download_rejects_non_http():
     assert path is None and err
 
 
-def test_download_size_cap_aborts_and_cleans(media_server, tmp_path):
+def test_download_malformed_url_returns_error():
+    m = load_app()
+    path, err = m.download_media_to_temp("http://[::1", "视频")
+    assert path is None and err
+
+
+def test_download_size_cap_aborts_and_cleans(media_server):
     m = load_app()
     m.MEDIA_DOWNLOAD_MAX_MB = 0  # 上限 0MB：首个分块即超限
+    tmp_dir = Path(tempfile.gettempdir())
+    before = set(tmp_dir.glob("tobacco_media_*"))
     path, err = m.download_media_to_temp(media_server + "/v.mp4", "视频")
     assert path is None and "上限" in err
+    assert set(tmp_dir.glob("tobacco_media_*")) == before  # 半成品临时文件已清理
