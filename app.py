@@ -15,6 +15,7 @@ import tempfile
 import threading
 import time
 import uuid
+import urllib.request
 from datetime import datetime, timedelta
 from email.message import Message as EmailMessage
 from http.server import ThreadingHTTPServer, BaseHTTPRequestHandler
@@ -167,6 +168,61 @@ def local_media_allowed(path):
         return False
     allowed_roots = [ROOT, Path("/tmp")]
     return resolved.exists() and resolved.is_file() and any(root == resolved or root in resolved.parents for root in allowed_roots)
+
+
+MEDIA_DOWNLOAD_MAX_MB = int(os.environ.get("MEDIA_DOWNLOAD_MAX_MB", "200"))
+MEDIA_DOWNLOAD_TIMEOUT_SECONDS = int(os.environ.get("MEDIA_DOWNLOAD_TIMEOUT_SECONDS", "120"))
+MEDIA_SUFFIX_WHITELIST = {".jpg", ".jpeg", ".png", ".bmp", ".webp",
+                          ".mp4", ".mov", ".avi", ".mkv",
+                          ".wav", ".mp3", ".m4a", ".aac", ".flac"}
+MEDIA_CONTENT_TYPE_SUFFIX = {
+    "image/jpeg": ".jpg", "image/png": ".png", "image/bmp": ".bmp", "image/webp": ".webp",
+    "video/mp4": ".mp4", "video/quicktime": ".mov", "video/x-matroska": ".mkv",
+    "audio/wav": ".wav", "audio/x-wav": ".wav", "audio/mpeg": ".mp3",
+    "audio/mp4": ".m4a", "audio/aac": ".aac", "audio/flac": ".flac",
+}
+MEDIA_DEFAULT_SUFFIX = {"图片": ".jpg", "视频": ".mp4", "音频": ".mp3"}
+
+
+def download_media_to_temp(media_url, content_type=""):
+    """把爬虫缓存的媒体链接下载为本地临时文件，供多模态识别消费（用完由调用方删除）。
+    返回 (Path, None) 或 (None, 错误描述)，不抛异常。
+    守卫：仅 http/https；MEDIA_DOWNLOAD_MAX_MB 大小上限；MEDIA_DOWNLOAD_TIMEOUT_SECONDS 墙钟总时长。"""
+    parsed = urlparse(media_url or "")
+    if parsed.scheme not in {"http", "https"}:
+        return None, f"仅支持 http/https 媒体链接：{media_url or '(空)'}"
+    req = urllib.request.Request(
+        media_url, headers={"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) TobaccoDetection/1.0"})
+    max_bytes = MEDIA_DOWNLOAD_MAX_MB * 1024 * 1024
+    started = time.monotonic()
+    tmp = None
+    try:
+        proxy_handler = urllib.request.ProxyHandler({})
+        opener = urllib.request.build_opener(proxy_handler)
+        with opener.open(req, timeout=30) as resp:
+            suffix = Path(urlparse(resp.geturl()).path).suffix.lower()
+            if suffix not in MEDIA_SUFFIX_WHITELIST:
+                mime = (resp.headers.get_content_type() or "").lower()
+                suffix = MEDIA_CONTENT_TYPE_SUFFIX.get(mime) or MEDIA_DEFAULT_SUFFIX.get(content_type, ".bin")
+            tmp = tempfile.NamedTemporaryFile(prefix="tobacco_media_", suffix=suffix, delete=False)
+            total = 0
+            while True:
+                if time.monotonic() - started > MEDIA_DOWNLOAD_TIMEOUT_SECONDS:
+                    raise RuntimeError(f"下载超时(>{MEDIA_DOWNLOAD_TIMEOUT_SECONDS}s)")
+                chunk = resp.read(256 * 1024)
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > max_bytes:
+                    raise RuntimeError(f"超过大小上限 {MEDIA_DOWNLOAD_MAX_MB}MB")
+                tmp.write(chunk)
+        tmp.close()
+        return Path(tmp.name), None
+    except Exception as exc:
+        if tmp is not None:
+            tmp.close()
+            Path(tmp.name).unlink(missing_ok=True)
+        return None, str(exc)
 
 
 def public_media_url(media_url):
