@@ -15,7 +15,7 @@
 ## 目标与约束
 
 - 二次批次帖（`confirm_batch_id<>''`）且 `media_url` 为 http/https 时：识别阶段下载到本地临时文件 → 视觉/语音服务收到本地路径（证据帧 JPG / 风险片段 WAV 照常落盘）→ `finally` 删除临时文件。
-- 下载失败不阻断识别：沿用现有 fallback 形态退化 mock，但把 `download_error` 写入 image 结果（进 `result_json`），退化**可见**、不再静默。
+- 下载失败不阻断识别：沿用现有 fallback 形态退化 mock，但把 `download_error` 写入 fusion 结果（该行必然写库），若视觉通道走过也同时写入 image 结果——退化**可见**、不再静默。
 - 纯标准库（`urllib.request`）；不改两个识别服务；不改识别分流/融合；不改写 `media_url` 字段（原链接留库，详情页原片预览热链爬虫缓存）。
 - 下载守卫：仅 http/https；单文件上限 200MB（对齐 `max_upload_mb`/`max_file_size_mb` 默认，env `MEDIA_DOWNLOAD_MAX_MB` 可覆盖）；总时长上限 120s（`urlopen(timeout=30)` 管连接/单次读阻塞 + 分块读循环内按墙钟累计强制，防慢速滴流）；跟随重定向（urllib 默认行为）。
 - 首轮内容（文本粗筛）不碰媒体，完全不受影响。
@@ -36,7 +36,7 @@
 - `is_visual_media`/`is_audio_media` 判定沿用（下载后 `media_ext` 可从临时文件后缀取得）。
 - 视觉调用把 `image_url` 传 `str(media_path)`（原为 `content["media_url"]`）——`resolve_media_path` 对绝对路径直接命中、`local_media_allowed` 白名单本含 `/tmp`（app.py:163-169），`analyze_image_with_vision` 内部机制零改动。语音分支本就直接消费 `media_path`。
 - **evidence_frame 回指原链接**：下载场景中 `analyze_image_with_vision` 会把 `evidence_frame` 设为临时路径（app.py:925），识别后临时文件即删、该字段会悬空——拿到 `image_result` 后覆写 `image_result["evidence_frame"] = content["media_url"]`。标注证据帧本体已由视觉服务落盘 `storage/evidence/<content_id>/`，不受影响。
-- 下载失败时：视觉照现状走 `analyze_image` mock，之后 `image_result["download_error"] = 错误串`；音频照现状跳过（`audio_result` 为 None，`result_json` 无 audio 行，`download_error` 在 image 行可见即够）。
+- 下载失败时：视觉照现状走 `analyze_image` mock，之后 `image_result["download_error"] = 错误串`；音频照现状跳过（`audio_result` 为 None，无 audio 行）；`download_error` 同时写入 fusion 结果 dict（fusion 行必然写库，覆盖音频-only 帖等无 image 行的情况）。
 - `finally`：`downloaded_tmp` 非 None → `unlink(missing_ok=True)`。手动重识别批次帖走同一路径（再次下载），爬虫缓存在保留期内即可用。
 
 ### 3. 落盘链路（本特性后的完整图景）
@@ -50,7 +50,7 @@
 pytest 内起 stdlib `ThreadingHTTPServer` 模拟爬虫缓存文件服务器：
 
 1. **下载喂路径**：批次视频帖 `media_url=http://127.0.0.1:<port>/v.mp4` → monkeypatch 视觉/语音调用捕获入参 → 断言收到真实存在的本地文件路径、识别 `completed`、识别结束后该临时文件已删除。
-2. **失败可见**：404 链接 → 识别仍 `completed`（mock 退化），`recognition_results` 的 image 行 `result_json` 含 `download_error`。
+2. **失败可见**：404 链接 → 识别仍 `completed`（mock 退化），`recognition_results` 的 image 行与 fusion 行 `result_json` 均含 `download_error`。
 3. **首轮不下载**：非批次帖带 http `media_url` → 下载函数不被调用（monkeypatch 计数为 0）。
 4. **下载函数单测**：超限中止（env 覆盖小上限）、后缀推断（URL 后缀 / Content-Type / content_type 兜底三档）。
 5. 全量 `python3 -m pytest` 无回归。
