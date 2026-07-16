@@ -29,6 +29,8 @@ class _MediaHandler(BaseHTTPRequestHandler):
             self.send_response(302)
             self.send_header("Location", "/v.mp4")
             self.end_headers()
+        elif self.path == "/blob":
+            self._send(MP4_BYTES, "application/octet-stream")
         else:
             self.send_response(404)
             self.end_headers()
@@ -67,6 +69,13 @@ def test_download_suffix_from_content_type(media_server):
     m = load_app()
     path, err = m.download_media_to_temp(media_server + "/noext", "图片")
     assert err is None and path is not None and path.suffix == ".png"
+    path.unlink()
+
+
+def test_download_suffix_fallback_from_content_type_label(media_server):
+    m = load_app()
+    path, err = m.download_media_to_temp(media_server + "/blob", "视频")
+    assert err is None and path is not None and path.suffix == ".mp4"
     path.unlink()
 
 

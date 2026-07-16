@@ -1621,13 +1621,13 @@ def recognize_content(content_id):
     audio_score = 0
     image_result = None
     audio_result = None
+    download_error = None
     # 识别分流：首次识别(无 confirm_batch_id)只跑 LLM 文本粗筛；
     # 二次确认批次(有 confirm_batch_id)才对高危账户的帖子跑图像/视频/语音多模态。
     if content.get("confirm_batch_id"):
         media_url = content["media_url"] or ""
         media_path = resolve_media_path(media_url)
         downloaded_tmp = None
-        download_error = None
         # 爬虫缓存链接：本地无此媒体且是 http(s) 时按需下载为临时文件（识别完即删）
         if media_path is None and urlparse(media_url).scheme in {"http", "https"}:
             url_ext = Path(urlparse(media_url).path).suffix.lower()
@@ -1670,7 +1670,7 @@ def recognize_content(content_id):
         "audio_available": audio_result is not None,
         "account_risk_score": account_score,
     })
-    if content.get("confirm_batch_id") and download_error:
+    if download_error:
         fusion["download_error"] = download_error
     # 评论区结合帖子上下文逐条打分（仍在识别阶段，不占用数据库连接）
     comment_scores = score_content_comments(content)

@@ -1259,6 +1259,7 @@ function accountPostMultimodal(p) {
   const violation = (p.fusion && p.fusion.violation_type) || [];
   if (violation.length) parts.push(`<div><b>融合结论：</b>${escapeHtml(violation.join("、"))}</div>`);
   if (p.fusion && p.fusion.model_explanation) parts.push(`<div><b>融合说明：</b>${escapeHtml(p.fusion.model_explanation)}</div>`);
+  if (p.fusion && p.fusion.download_error) parts.push(`<div class="pre" style="color:#c0392b">⚠ 媒体下载失败，图像/语音为规则兜底结果：${escapeHtml(p.fusion.download_error)}</div>`);
   const imgs = (p.evidence_images || [])
     .map(u => `<img src="${escapeHtml(u)}" alt="证据帧" style="max-width:160px;max-height:160px;margin:4px 4px 0 0;border:1px solid var(--line);border-radius:6px">`)
     .join("");
